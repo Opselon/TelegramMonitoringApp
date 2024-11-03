@@ -1,6 +1,3 @@
-Here's the updated README that includes details about the Telegram Bot features for mixing, receiving, exporting Excel files, and special configurations:
-
----
 
 # Customer Monitoring Application
 
