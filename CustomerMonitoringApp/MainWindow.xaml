@@ -1,0 +1,17 @@
+﻿<Window x:Class="CustomerMonitoringApp.WPFApp.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Customer Monitoring App" Height="450" Width="800">
+    <Grid>
+        <ListView x:Name="UserListView">
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="User ID" DisplayMemberBinding="{Binding UserId}" />
+                    <GridViewColumn Header="Telegram ID" DisplayMemberBinding="{Binding UserTelegramID}" />
+                    <GridViewColumn Header="Name" DisplayMemberBinding="{Binding UserNameProfile}" />
+                    <!-- Add more columns as needed -->
+                </GridView>
+            </ListView.View>
+        </ListView>
+    </Grid>
+</Window>
