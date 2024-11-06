@@ -37,7 +37,7 @@ public partial class App : Application
                 services.AddScoped<IUserRepository, UserRepository>();
                 services.AddScoped<ICallHistoryRepository, CallHistoryRepository>();
                 services.AddScoped<UserService>(); // Add other application services
-
+                services.AddScoped<CallHistoryImportService>();
                 // Register MainWindow as a singleton (WPF's main window)
                 services.AddSingleton<MainWindow>();
 

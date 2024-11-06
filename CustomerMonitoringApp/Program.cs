@@ -45,9 +45,13 @@ namespace CustomerMonitoringApp
                     // Configure DbContext with SQL Server using the connection string
                     services.AddDbContext<AppDbContext>(options =>
                         options.UseSqlServer(connectionString));
-
+                    services.AddLogging();
                     // Register repositories and services for dependency injection
                     services.AddScoped<IUserRepository, UserRepository>();
+                    services.AddTransient<ICallHistoryRepository, CallHistoryRepository>(); // Ensure your implementation is registered
+                    services.AddTransient<CallHistoryImportService>(); // Register CallHistoryImportService
+
+
                     services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
                     services.AddScoped<UserService>();
         

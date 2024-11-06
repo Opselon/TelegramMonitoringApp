@@ -4,6 +4,7 @@ using CustomerMonitoringApp.Infrastructure.Data;
 using CustomerMonitoringApp.Infrastructure.Repositories;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using OfficeOpenXml;
 using Polly;
 using Polly.Retry;
@@ -17,15 +18,15 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
-using System.Windows.Input; // Ensure this is included for RichTextBox
+using System.Windows.Input; 
 using System.Windows.Media;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
-using Telegram.Bot.Polling; // For SolidColorBrush and Color
+using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
-using Color = System.Windows.Media.Color; // Alias to avoid ambiguity
+using Color = System.Windows.Media.Color;
 using File = System.IO.File;
 using Run = System.Windows.Documents.Run;
 
@@ -34,7 +35,7 @@ namespace CustomerMonitoringApp.WPFApp
     public partial class MainWindow : Window
     {
         #region Fields and Properties
-
+        private readonly ILogger<MainWindow> _logger;
         private CancellationTokenSource _cancellationTokenSource;
         private ITelegramBotClient _botClient;
         private readonly NotificationService _notificationService;
@@ -57,15 +58,19 @@ namespace CustomerMonitoringApp.WPFApp
             LoadUsersFromDatabaseAsync();
         }
 
-        // Dependency Injection constructor
-        public MainWindow(ICallHistoryRepository callHistoryRepository,IServiceProvider serviceProvider, NotificationService notificationService , CallHistoryImportService callHistoryImportService) : this()
+        public MainWindow(
+            ILogger<MainWindow> logger,
+            ICallHistoryRepository callHistoryRepository,
+            IServiceProvider serviceProvider,
+            NotificationService notificationService,
+            CallHistoryImportService callHistoryImportService)
         {
-            _serviceProvider = serviceProvider;
-            _notificationService = notificationService;  // Initialize NotificationService
-            _callHistoryImportService = callHistoryImportService;
-            _callHistoryRepository = callHistoryRepository;
+            _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _callHistoryRepository = callHistoryRepository ?? throw new ArgumentNullException(nameof(callHistoryRepository));
+            _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
+            _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
+            _callHistoryImportService = callHistoryImportService ?? throw new ArgumentNullException(nameof(callHistoryImportService));
         }
-
         #endregion
 
         #region Bot Initialization
@@ -230,150 +235,159 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
 
-        private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
+private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
+{
+    var chatId = update.Message?.Chat.Id;
+    var startTime = DateTime.UtcNow; // Start time for processing metrics
+
+    if (chatId == null)
+    {
+        Log("Error: chatId is null.");
+        return;
+    }
+
+    try
+    {
+        // Validate the update type and file extension
+        if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Document)
         {
-            var chatId = update.Message?.Chat.Id;
-            var startTime = DateTime.UtcNow; // Start time for processing metrics
+            var document = update.Message.Document;
 
-            try
+            if (document != null && Path.GetExtension(document.FileName).Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
             {
-                // Validate the update type and file extension
-                if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Document)
+                // Inform the user that the file is being processed
+                await botClient.SendMessage(
+                    chatId: chatId.Value,
+                    text: "📥 Received your .xlsx file! Processing...",
+                    cancellationToken: cancellationToken
+                );
+                Log($"Received .xlsx file from user {chatId}: {document.FileName}");
+
+                // Step 1: Download the file
+                string filePath;
+                try
                 {
-                    var document = update.Message.Document;
+                    filePath = await DownloadFileAsync(document, cancellationToken);
+                    Log($"File downloaded successfully: {filePath}");
+                }
+                catch (Exception downloadEx)
+                {
+                    Log($"Error downloading file from user {chatId}: {downloadEx.Message}");
+                    await botClient.SendMessage(
+                        chatId: chatId.Value,
+                        text: "❌ Error downloading the file. Please try again.",
+                        cancellationToken: cancellationToken
+                    );
+                    return;
+                }
 
-                    if (document != null && Path.GetExtension(document.FileName).Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
+                // Step 3: Identify file type (CallHistory or UsersUpdate)
+                bool isCallHistory = await IsCallHistoryFileAsync(filePath);
+                bool isUserFile = await IsUserFile(filePath);
+
+                if (isCallHistory)
+                {
+                    // Process CallHistory data
+                    try
                     {
-                        // Inform the user that the file is being processed
-                        await botClient.SendMessage(
-                            chatId: chatId,
-                            text: "📥 Received your .xlsx file! Processing...",
-                            cancellationToken: cancellationToken
-                        );
-                        Log($"Received .xlsx file from user {chatId}: {document.FileName}");
-
-                        // Step 1: Download the file
-                        string filePath;
-                        try
-                        {
-                            filePath = await DownloadFileAsync(document, cancellationToken);
-                            Log($"File downloaded successfully: {filePath}");
-                        }
-                        catch (Exception downloadEx)
-                        {
-                            Log($"Error downloading file from user {chatId}: {downloadEx.Message}");
-                            await botClient.SendMessage(
-                                chatId: chatId,
-                                text: "❌ Error downloading the file. Please try again.",
-                                cancellationToken: cancellationToken
-                            );
-                            return;
-                        }
-
-                        // Step 2: Validate the file content
-                        if (!await ValidateExcelFileAsync(filePath))
-                        {
-                            await botClient.SendMessage(
-                                chatId: chatId,
-                                text: "❌ The file does not contain enough rows or columns. Please ensure the file has more than 7 fields per row.",
-                                cancellationToken: cancellationToken
-                            );
-                            Log($"User {chatId} uploaded a file with insufficient details: {document.FileName}");
-                            return;
-                        }
-
-                        // Step 3: Identify file type (CallHistory or UsersUpdate)
-                        bool isCallHistory = await IsCallHistoryFileAsync(filePath);  // New method to check file type
-                        if (isCallHistory)
-                        {
-                            // Process CallHistory data
-                            try
-                            {
-                                var callHistoryService = new CallHistoryImportService(_callHistoryRepository);
-                                await callHistoryService.ProcessExcelFileAsync(filePath);
-                                Log($"File processed and call history data saved: {filePath}");
-                            }
-                            catch (Exception ex)
-                            {
-                                Log($"Error processing CallHistory data for user {chatId}: {ex.Message}");
-                                await botClient.SendMessage(
-                                    chatId: chatId,
-                                    text: "❌ Failed to import CallHistory data. Please ensure the file format is correct.",
-                                    cancellationToken: cancellationToken
-                                );
-                                return;
-                            }
-                        }
-                        else
-                        {
-                            // Process Users Update data
-                            try
-                            {
-                                //if file was not history so add users from ImportToDatabase method
-                                await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
-                                Log($"File processed and users data saved: {filePath}");
-                            }
-                            catch (Exception ex)
-                            {
-                                Log($"Error processing Users data for user {chatId}: {ex.Message}");
-                                await botClient.SendMessage(
-                                    chatId: chatId,
-                                    text: "❌ Failed to import Users data. Please ensure the file format is correct.",
-                                    cancellationToken: cancellationToken
-                                );
-                                return;
-                            }
-                        }
-
-                        // Step 4: Inform the user of success and provide summary
-                        await botClient.SendMessage(
-                            chatId: chatId,
-                            text: "✅ File processed and data imported successfully!",
-                            cancellationToken: cancellationToken
-                        );
-                        Log($"User {chatId} was informed of successful processing.");
+                        // Use _callHistoryImportService to process the file
+                        await _callHistoryImportService.ProcessExcelFileAsync(filePath);
+                        Log($"File processed and call history data saved: {filePath}");
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        // Handle incorrect file types with detailed feedback
+                        Log($"Error processing CallHistory data for user {chatId}: {ex.Message}");
                         await botClient.SendMessage(
-                            chatId: chatId,
-                            text: "⚠️ Please upload a valid .xlsx file.",
+                            chatId: chatId.Value,
+                            text: $"❌ Failed to import CallHistory data. Please ensure the file format is correct. Error: {ex.Message}",
                             cancellationToken: cancellationToken
                         );
-                        Log($"User {chatId} attempted to upload an invalid file type: {document?.FileName}");
+                        return;
+                    }
+                }
+                else if (isUserFile)
+                {
+                    // Process Users Update data
+                    try
+                    {
+                        await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
+                        Log($"File processed and users data saved: {filePath}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"Error processing Users data for user {chatId}: {ex.Message}");
+                        await botClient.SendMessage(
+                            chatId: chatId.Value,
+                            text: "❌ Failed to import Users data. Please ensure the file format is correct.",
+                            cancellationToken: cancellationToken
+                        );
+                        return;
                     }
                 }
                 else
                 {
-                    Log("Received unsupported update type.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Log($"Unhandled error in HandleUpdateAsync for user {chatId}: {ex.Message}");
-                if (chatId != null)
-                {
+                    // Handle unsupported file types
                     await botClient.SendMessage(
                         chatId: chatId.Value,
-                        text: "❌ An unexpected error occurred while processing your file. Please try again later.",
+                        text: "⚠️ The file type is not supported. Please upload a valid .xlsx file.",
                         cancellationToken: cancellationToken
                     );
+                    Log($"User {chatId} uploaded an unsupported file type: {document?.FileName}");
+                    return;
                 }
-            }
-            finally
-            {
-                // Calculate processing duration and log for performance analysis
-                var duration = DateTime.UtcNow - startTime;
-                Log($"Completed file processing for user {chatId} in {duration.TotalSeconds} seconds.");
-            }
 
-            if (update.Type == UpdateType.CallbackQuery)
+                // Step 4: Inform the user of success and provide summary
+                await botClient.SendMessage(
+                    chatId: chatId.Value,
+                    text: "✅ File processed and data imported successfully!",
+                    cancellationToken: cancellationToken
+                );
+                Log($"User {chatId} was informed of successful processing.");
+            }
+            else
             {
-                await HandleCallbackQueryAsync(botClient, update.CallbackQuery, cancellationToken);
-                return; // Exit early after handling the callback
+                // Handle incorrect file types with detailed feedback
+                await botClient.SendMessage(
+                    chatId: chatId.Value,
+                    text: "⚠️ Please upload a valid .xlsx file.",
+                    cancellationToken: cancellationToken
+                );
+                Log($"User {chatId} attempted to upload an invalid file type: {document?.FileName}");
             }
         }
+        else
+        {
+            Log("Received unsupported update type.");
+        }
+    }
+    catch (Exception ex)
+    {
+        Log($"Unhandled error in HandleUpdateAsync for user {chatId}: {ex.Message}");
+        if (chatId != null)
+        {
+            await botClient.SendMessage(
+                chatId: chatId.Value,
+                text: "❌ An unexpected error occurred while processing your file. Please try again later.",
+                cancellationToken: cancellationToken
+            );
+        }
+    }
+    finally
+    {
+        // Calculate processing duration and log for performance analysis
+        var duration = DateTime.UtcNow - startTime;
+        Log($"Completed file processing for user {chatId} in {duration.TotalSeconds} seconds.");
+    }
+
+    // Handle CallbackQuery if applicable
+    if (update.Type == UpdateType.CallbackQuery)
+    {
+        await HandleCallbackQueryAsync(botClient, update.CallbackQuery, cancellationToken);
+        return; // Exit early after handling the callback
+    }
+}
+
+
 
         private async Task<bool> IsCallHistoryFileAsync(string filePath)
         {
@@ -382,11 +396,24 @@ namespace CustomerMonitoringApp.WPFApp
             {
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
-                    var worksheet = package.Workbook.Worksheets[0];
+                    // Check if there are any worksheets in the file
+                    if (package.Workbook.Worksheets.Count == 0)
+                    {
+                        Log("Error: No worksheets found in the Excel file.");
+                        return false;
+                    }
+
+                    // Ensure we're not accessing an out-of-range index
+                    var worksheet = package.Workbook.Worksheets.FirstOrDefault();
+                    if (worksheet == null)
+                    {
+                        Log("Error: No valid worksheet found.");
+                        return false;
+                    }
 
                     // Retrieve row and column counts
-                    var rowCount = worksheet.Dimension.Rows;
-                    var columnCount = worksheet.Dimension.Columns;
+                    var rowCount = worksheet.Dimension?.Rows ?? 0;
+                    var columnCount = worksheet.Dimension?.Columns ?? 0;
 
                     // Check if the file has enough columns (6 expected)
                     if (columnCount < 6)
@@ -426,6 +453,9 @@ namespace CustomerMonitoringApp.WPFApp
                         return false;
                     }
 
+                    // Counter for valid rows
+                    int validRowCount = 0;
+
                     // Validate each data row
                     for (int row = 2; row <= rowCount; row++)
                     {
@@ -436,13 +466,20 @@ namespace CustomerMonitoringApp.WPFApp
                         var durationText = worksheet.Cells[row, 5].Text.Trim(); // Column E: "مدت"
                         var callType = worksheet.Cells[row, 6].Text.Trim(); // Column F: "نوع تماس"
 
+                        // Skip row if phone numbers are not numeric
+                        if (!IsNumeric(sourcePhone) || !IsNumeric(destinationPhone))
+                        {
+                            Log($"INFO: Skipping row {row} due to non-numeric phone numbers. Source Phone: '{sourcePhone}', Destination Phone: '{destinationPhone}'");
+                            continue;  // Skip this row and move to the next one
+                        }
+
                         // Validate if essential data is available and non-empty
                         if (string.IsNullOrWhiteSpace(sourcePhone) || string.IsNullOrWhiteSpace(destinationPhone) ||
                             string.IsNullOrWhiteSpace(date) || string.IsNullOrWhiteSpace(time) ||
                             string.IsNullOrWhiteSpace(durationText) || string.IsNullOrWhiteSpace(callType))
                         {
                             Log($"Error: Row {row} contains missing data.");
-                            return false;  // Incomplete row, invalid file
+                            continue;  // Skip this row and move to the next one
                         }
 
                         // Validate the format of Date (yyyy/MM/dd) and Duration (integer)
@@ -450,12 +487,21 @@ namespace CustomerMonitoringApp.WPFApp
                             !int.TryParse(durationText, out _))
                         {
                             Log($"Error: Invalid data format in row {row}. Date: '{date}', Duration: '{durationText}'");
-                            return false; // Invalid date or duration format
+                            continue;  // Skip this row and move to the next one
+                        }
+
+                        // Increment valid row counter
+                        validRowCount++;
+
+                        // If we have more than 30 valid rows, return true
+                        if (validRowCount > 30)
+                        {
+                            return true;
                         }
                     }
 
-                    // If we have passed all checks, return true
-                    return true;
+                    // If we don't have more than 30 valid rows, return false
+                    return false;
                 }
             }
             catch (Exception ex)
@@ -466,275 +512,118 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
 
-        private async Task<bool> ValidateExcelFileAsync(string filePath)
+        // Helper method to check if a string contains only numeric characters
+        private bool IsNumeric(string input)
         {
+            return input.All(c => Char.IsDigit(c));
+        }
+
+
+
+        private async Task<bool> IsUserFile(string filePath)
+        {
+            // Check if the file follows the expected structure for a User file
             try
             {
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
-                    var worksheet = package.Workbook.Worksheets.FirstOrDefault();
+                    var worksheet = package.Workbook.Worksheets[0];
 
-                    // Check if the worksheet exists
-                    if (worksheet == null)
+                    // Retrieve row and column counts
+                    var rowCount = worksheet.Dimension.Rows;
+                    var columnCount = worksheet.Dimension.Columns;
+
+                    // Check if the file has enough columns (6 expected)
+                    if (columnCount < 6)
                     {
-                        Console.WriteLine("The worksheet does not exist.");
+                        Log("Error: The file has fewer than 6 columns.");
                         return false;
                     }
 
-                    // Get the row count from the worksheet
-                    int rowCount = worksheet.Dimension?.Rows ?? 0;
-                    var columnCount = worksheet.Dimension?.Columns ?? 0;
+                    // Expected headers for a User file
+                    var expectedHeaders = new List<string>
+            {
+                "شماره تلفن",    // Phone Number
+                "نام",           // First Name
+                "نام خانوادگی",  // Last Name
+                "نام پدر",       // Father's Name
+                "تاریخ تولد",    // Date of Birth
+                "نشانی"         // Address
+            };
 
-                    // Minimum row and column count check
-                    if (rowCount < 2 || columnCount < 2) // We need at least 2 columns for validation
+                    // Validate headers
+                    for (int col = 1; col <= columnCount; col++)
                     {
-                        Console.WriteLine("The file does not contain enough rows or columns. Please ensure the file has at least 2 fields per row.");
-                        return false; // Insufficient data
+                        var header = worksheet.Cells[1, col].Text.Trim(); // Trim any extra spaces from headers
+
+                        // Check if any header matches the expected ones
+                        if (!expectedHeaders.Contains(header))
+                        {
+                            Log($"Error: Invalid header '{header}' at column {col}.");
+                            return false;
+                        }
                     }
 
-               
-
-                    // Determine if it's a History Update or Users Update
-                    bool isHistoryUpdate = IsHistoryUpdateFile(worksheet, columnCount, rowCount);
-                    bool isUsersUpdate = IsUsersUpdateFile(worksheet, columnCount, rowCount);
-
-                    // If neither file type is identified, return false
-                    if (!isHistoryUpdate && !isUsersUpdate)
+                    // Check if there are enough rows of data (at least 2 rows: 1 header + 1 data row)
+                    if (rowCount < 2)
                     {
-                        Console.WriteLine("Unable to determine the file type. It must be either a History Update or a Users Update.");
+                        Log("Error: File contains too few rows (must be at least 2).");
                         return false;
                     }
 
-                    bool foundValidData = false;
-
-                    // Validate based on the file type
-                    if (isHistoryUpdate)
-                    {
-                        // History Update file (conversation details) - Validate "Source Number" and "User Address"
-                        foundValidData = ValidateHistoryUpdateFile(worksheet, rowCount);
-                    }
-                    else if (isUsersUpdate)
-                    {
-                        // Users Update file (number owners) - Validate "Phone Number" and "User Address"
-                        foundValidData = ValidateUsersUpdateFile(worksheet, rowCount);
-                    }
-
-                    if (!foundValidData)
-                    {
-                        Console.WriteLine("The file does not contain valid data.");
-                        return false; // If no valid data is found, reject the file
-                    }
-
-                    return true; // All validation checks passed, file accepted
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error validating Excel file: {ex.Message}");
-                return false;
-            }
-        }
-        private bool IsHistoryUpdateFile(ExcelWorksheet worksheet, int columnCount, int rowCount)
-        {
-            try
-            {
-                // Expected headers for a History Update file
-                var expectedHeaders = new HashSet<string> { "شماره مبدا", "شماره مقصد", "تاریخ", "ساعت", "مدت", "نوع تماس" };
-
-                // Validate if required columns are in the first row
-                HashSet<string> headersFound = new HashSet<string>();
-
-                for (int col = 1; col <= columnCount; col++)
-                {
-                    var header = worksheet.Cells[1, col].Text.Trim(); // Trim spaces
-                    if (expectedHeaders.Contains(header))
-                    {
-                        headersFound.Add(header);
-                    }
-                }
-
-                // Check if all expected headers are found
-                if (headersFound.Count == expectedHeaders.Count)
-                {
-                    // Now, validate data rows after the header
-                    int validRowCount = 0;
+                    // Validate each data row
                     for (int row = 2; row <= rowCount; row++)
                     {
-                        var sourcePhone = worksheet.Cells[row, 1].Text.Trim();  // Source Phone Number
-                        var destPhone = worksheet.Cells[row, 2].Text.Trim();    // Destination Phone Number
-                        var date = worksheet.Cells[row, 3].Text.Trim();         // Date
-                        var duration = worksheet.Cells[row, 5].Text.Trim();     // Duration
+                        var phoneNumber = worksheet.Cells[row, 1].Text.Trim();  // Column A: "شماره تلفن"
+                        var firstName = worksheet.Cells[row, 2].Text.Trim();    // Column B: "نام"
+                        var lastName = worksheet.Cells[row, 3].Text.Trim();     // Column C: "نام خانوادگی"
+                        var fatherName = worksheet.Cells[row, 4].Text.Trim();   // Column D: "نام پدر"
+                        var birthDate = worksheet.Cells[row, 5].Text.Trim();    // Column E: "تاریخ تولد"
+                        var address = worksheet.Cells[row, 6].Text.Trim();     // Column F: "نشانی"
 
-                        // Check if essential columns have valid data
-                        if (!string.IsNullOrEmpty(sourcePhone) && !string.IsNullOrEmpty(destPhone) && !string.IsNullOrEmpty(date) && !string.IsNullOrEmpty(duration))
+                        // Validate if essential data is available and non-empty
+                        if (string.IsNullOrWhiteSpace(phoneNumber) || string.IsNullOrWhiteSpace(firstName) ||
+                            string.IsNullOrWhiteSpace(lastName) || string.IsNullOrWhiteSpace(fatherName) ||
+                            string.IsNullOrWhiteSpace(birthDate) || string.IsNullOrWhiteSpace(address))
                         {
-                            validRowCount++;
+                            Log($"Error: Row {row} contains missing data.");
+                            return false;  // Incomplete row, invalid file
                         }
 
-                        // Stop if we've found enough valid rows (for example, at least 3 valid rows)
-                        if (validRowCount >= 3)
+                        // Validate the format of Phone Number (e.g., check if it starts with "98" and has the correct number of digits)
+                        if (!IsValidPhoneNumber(phoneNumber))
                         {
-                            return true; // Valid History Update file
-                        }
-                    }
-
-                    // If not enough valid rows, return false
-                    Console.WriteLine("Not enough valid data rows in the History Update file.");
-                    return false;
-                }
-                else
-                {
-                    Console.WriteLine("Missing expected headers in the History Update file.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error checking History Update file: {ex.Message}");
-            }
-
-            return false; // Return false if any condition is not met
-        }
-
-        private bool IsUsersUpdateFile(ExcelWorksheet worksheet, int columnCount, int rowCount)
-        {
-            try
-            {
-                // Expected headers for a Users Update file
-                var expectedHeaders = new HashSet<string> { "شماره تلفن:", "نام:", "نام خانوادگی:", "نام پدر:", "تاریخ تولد:", "نشانی:" };
-
-                // Validate if required columns are in the first row
-                HashSet<string> headersFound = new HashSet<string>();
-
-                for (int col = 1; col <= columnCount; col++)
-                {
-                    var header = worksheet.Cells[1, col].Text.Trim(); // Trim spaces
-                    if (expectedHeaders.Contains(header))
-                    {
-                        headersFound.Add(header);
-                    }
-                }
-
-                // Check if all expected headers are found
-                if (headersFound.Count == expectedHeaders.Count)
-                {
-                    // Now, validate data rows after the header
-                    int validRowCount = 0;
-                    for (int row = 2; row <= rowCount; row++)
-                    {
-                        var phoneNumber = worksheet.Cells[row, 1].Text.Trim();  // Phone Number
-                        var name = worksheet.Cells[row, 2].Text.Trim();         // Name
-                        var surname = worksheet.Cells[row, 3].Text.Trim();     // Surname
-                        var address = worksheet.Cells[row, 6].Text.Trim();     // Address
-
-                        // Check if essential columns have valid data
-                        if (!string.IsNullOrEmpty(phoneNumber) && !string.IsNullOrEmpty(name) && !string.IsNullOrEmpty(surname) && !string.IsNullOrEmpty(address))
-                        {
-                            validRowCount++;
+                            Log($"Error: Invalid phone number format in row {row}. Phone Number: '{phoneNumber}'");
+                            return false; // Invalid phone number format
                         }
 
-                        // Stop if we've found enough valid rows (for example, at least 3 valid rows)
-                        if (validRowCount >= 3)
+                        // Validate Date format (assume it should be in the format "yyyy/MM/dd")
+                        if (!DateTime.TryParseExact(birthDate, "yyyy/MM/dd", null, System.Globalization.DateTimeStyles.None, out _))
                         {
-                            return true; // Valid Users Update file
+                            Log($"Error: Invalid date format in row {row}. Date of Birth: '{birthDate}'");
+                            return false; // Invalid date format
                         }
                     }
 
-                    // If not enough valid rows, return false
-                    Console.WriteLine("Not enough valid data rows in the Users Update file.");
-                    return false;
-                }
-                else
-                {
-                    Console.WriteLine("Missing expected headers in the Users Update file.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error checking Users Update file: {ex.Message}");
-            }
-
-            return false; // Return false if any condition is not met
-        }
-
-
-
-        private bool ValidateHistoryUpdateFile(ExcelWorksheet worksheet, int rowCount)
-        {
-            try
-            {
-                // Validate "Source Number" and "User Address" for a History Update file
-                for (int row = 2; row <= rowCount; row++)
-                {
-                    var sourceNumber = worksheet.Cells[row, 1].Text; // Column A - Source Number
-                    var userAddress = worksheet.Cells[row, 2].Text; // Column B - User Address
-
-                    // Check if Source Number and User Address are present
-                    if (!string.IsNullOrWhiteSpace(sourceNumber) && !string.IsNullOrWhiteSpace(userAddress))
-                    {
-                        return true; // Valid data found
-                    }
-                }
-                return false; // No valid data found
-            }
-            catch (Exception ex)
-            {
-                // Handle any exceptions that occur during validation
-                Console.WriteLine($"Error during History Update file validation: {ex.Message}");
-                return false; // Return false if an error occurs
-            }
-        }
-
-        private bool ValidateUsersUpdateFile(ExcelWorksheet worksheet, int rowCount)
-        {
-            try
-            {
-                // Iterate through each row starting from the second row (to skip the header)
-                for (int row = 2; row <= rowCount; row++)
-                {
-                    var phoneNumber = worksheet.Cells[row, 1].Text.Trim(); // Column A - Phone Number
-                    var firstName = worksheet.Cells[row, 2].Text.Trim(); // Column B - First Name
-                    var lastName = worksheet.Cells[row, 3].Text.Trim(); // Column C - Last Name
-                    var fatherName = worksheet.Cells[row, 4].Text.Trim(); // Column D - Father's Name
-                    var dateOfBirth = worksheet.Cells[row, 5].Text.Trim(); // Column E - Date of Birth
-                    var address = worksheet.Cells[row, 6].Text.Trim(); // Column F - Address
-
-                    // Validate that essential fields (Phone Number, First Name, Last Name, Date of Birth, Address) are not empty
-                    if (string.IsNullOrWhiteSpace(phoneNumber) || string.IsNullOrWhiteSpace(firstName) ||
-                        string.IsNullOrWhiteSpace(lastName) || string.IsNullOrWhiteSpace(dateOfBirth) ||
-                        string.IsNullOrWhiteSpace(address))
-                    {
-                        // If any essential field is empty, this row is invalid
-                        continue; // Skip this row
-                    }
-
-                    // Validate that the Phone Number is in a proper format (e.g., checking if it's numeric or a valid pattern)
-                    if (!phoneNumber.StartsWith("98") || phoneNumber.Length != 12 || !long.TryParse(phoneNumber, out _))
-                    {
-                        // Invalid phone number format
-                        continue; // Skip this row
-                    }
-
-                    // Validate Date of Birth (assuming it follows "yyyy/MM/dd" format)
-                    if (!DateTime.TryParseExact(dateOfBirth, "yyyy/MM/dd", null, System.Globalization.DateTimeStyles.None, out _))
-                    {
-                        // Invalid date format
-                        continue; // Skip this row
-                    }
-
-                    // If we find a row with valid data, return true (indicating the file is valid)
+                    // If we have passed all checks, return true
                     return true;
                 }
-
-                // If no valid row is found, return false
-                return false;
             }
             catch (Exception ex)
             {
-                // Handle any exceptions that occur during validation
-                Console.WriteLine($"Error during Users Update file validation: {ex.Message}");
-                return false; // Return false if an error occurs
+                Log($"Error checking file type: {ex.Message}");
+                return false;  // If an error occurs, assume the file is not a valid User file
             }
         }
+
+        // Helper method to validate phone numbers (basic check for phone numbers starting with '98' and 12 digits in total)
+        private bool IsValidPhoneNumber(string phoneNumber)
+        {
+            // Check if the phone number starts with "98" (Iran's country code) and has exactly 12 digits
+            return phoneNumber.StartsWith("98") && phoneNumber.Length == 12 && phoneNumber.All(char.IsDigit);
+        }
+
+
 
 
 
