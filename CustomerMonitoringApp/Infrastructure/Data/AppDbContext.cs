@@ -18,7 +18,8 @@ namespace CustomerMonitoringApp.Infrastructure.Data
         /// Gets or sets the Users table in the database.
         /// </summary>
         public DbSet<User> Users { get; set; }
-
+        
+        public DbSet<CallHistory> CallHistories { get; set; }
         /// <summary>
         /// Gets or sets the UserPermissions table in the database.
         /// </summary>
@@ -30,49 +31,80 @@ namespace CustomerMonitoringApp.Infrastructure.Data
         /// <param name="modelBuilder">The model builder used to configure the model.</param>
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
-            // Call the base method to configure additional settings
             base.OnModelCreating(modelBuilder);
 
             // Configure the User entity
             modelBuilder.Entity<User>(entity =>
             {
-                // Specify the primary key for the User table
-                entity.HasKey(e => e.UserId);
+                entity.HasKey(e => e.UserId); // Set the primary key
 
-                // Configure properties for the User entity
                 entity.Property(e => e.UserNameFile)
-                      .IsRequired() // UserName is required
-                      .HasMaxLength(100); // Set maximum length
+                      .IsRequired()
+                      .HasMaxLength(100); // Set max length and required
 
                 entity.Property(e => e.UserTelegramID)
-                      .IsRequired(); // UserTelegramID is required and should be unique
+                      .IsRequired(); // Set as required field
 
                 // Configure the relationship between User and UserPermission
-                entity.HasMany(e => e.UserPermissions)
-                      .WithOne(e => e.User)
-                      .HasForeignKey(e => e.UserTelegramID)
-                      .OnDelete(DeleteBehavior.Cascade); // Optional: Configure delete behavior
+                entity.HasMany(e => e.UserPermissions) // Navigation property
+                      .WithOne(up => up.User) // Related entity
+                      .HasForeignKey(up => up.UserTelegramID) // Specify foreign key
+                      .OnDelete(DeleteBehavior.Cascade); // Define delete behavior
             });
 
             // Configure the UserPermission entity
             modelBuilder.Entity<UserPermission>(entity =>
             {
-                // Specify the primary key for the UserPermission table
-                entity.HasKey(e => e.PermissionId);
+                entity.HasKey(e => e.PermissionId); // Set the primary key
 
-                // Configure properties for the UserPermission entity
                 entity.Property(e => e.PermissionType)
-                      .IsRequired() // PermissionName is required
-                      .HasMaxLength(50); // Set maximum length
+                      .IsRequired()
+                      .HasMaxLength(50); // Set max length and required
 
                 entity.Property(e => e.UserTelegramID)
-                      .IsRequired(); // UserTelegramID is required
+                      .IsRequired(); // Set as required field
 
-                // Configure the relationship between UserPermission and User
-                entity.HasOne(e => e.User)
-                      .WithMany(e => e.UserPermissions)
-                      .HasForeignKey(e => e.UserTelegramID)
-                      .OnDelete(DeleteBehavior.Cascade); // Optional: Configure delete behavior
+                // Configure the relationship back to User
+                entity.HasOne(up => up.User) // Navigation property
+                      .WithMany(u => u.UserPermissions) // Related entity
+                      .HasForeignKey(up => up.UserTelegramID) // Specify foreign key
+                      .OnDelete(DeleteBehavior.Cascade); // Define delete behavior
+            });
+            modelBuilder.Entity<CallHistory>(entity =>
+            {
+                entity.HasKey(e => e.CallId);
+
+                entity.Property(e => e.SourcePhoneNumber)
+                    .IsRequired()
+                    .HasMaxLength(50);
+
+                entity.Property(e => e.DestinationPhoneNumber)
+                    .IsRequired()
+                    .HasMaxLength(50);
+
+                // Remove references to 'Date' and 'Time' and use 'CallDateTime' instead
+                entity.Property(e => e.CallDateTime)
+                    .IsRequired()
+                    .HasColumnType("datetime"); // Ensures the correct column type for DateTime
+
+                entity.Property(e => e.Duration)
+                    .IsRequired()
+                    .HasDefaultValue(0); // Set default for Duration in seconds
+
+                entity.Property(e => e.CallType)
+                    .IsRequired()
+                    .HasMaxLength(50);
+
+                // Define relationships with the User entity for Caller and Recipient
+                entity.HasOne(e => e.CallerUser)
+                    .WithMany() // Optional: User can have many CallHistories as caller
+                    .HasForeignKey(e => e.CallerUserId)
+                    .OnDelete(DeleteBehavior.Restrict); // Prevent cascading delete
+
+                entity.HasOne(e => e.RecipientUser)
+                    .WithMany() // Optional: User can have many CallHistories as recipient
+                    .HasForeignKey(e => e.RecipientUserId)
+                    .OnDelete(DeleteBehavior.Restrict); // Prevent cascading delete
             });
         }
     }

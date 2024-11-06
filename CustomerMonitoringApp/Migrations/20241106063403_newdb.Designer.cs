@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace CustomerMonitoringApp.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20241104042245_InitialCreate")]
-    partial class InitialCreate
+    [Migration("20241106063403_newdb")]
+    partial class newdb
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -24,6 +24,57 @@ namespace CustomerMonitoringApp.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
+
+            modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.CallHistory", b =>
+                {
+                    b.Property<int>("CallId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("CallId"));
+
+                    b.Property<DateTime>("CallDateTime")
+                        .HasColumnType("datetime");
+
+                    b.Property<string>("CallType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<int?>("CallerUserId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DestinationPhoneNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<int>("Duration")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
+
+                    b.Property<int?>("RecipientUserId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SourcePhoneNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<int?>("UserId")
+                        .HasColumnType("int");
+
+                    b.HasKey("CallId");
+
+                    b.HasIndex("CallerUserId");
+
+                    b.HasIndex("RecipientUserId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("CallHistories");
+                });
 
             modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.User", b =>
                 {
@@ -76,8 +127,8 @@ namespace CustomerMonitoringApp.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("nvarchar(100)");
 
-                    b.Property<int>("UserTelegramID")
-                        .HasColumnType("int");
+                    b.Property<long>("UserTelegramID")
+                        .HasColumnType("bigint");
 
                     b.HasKey("UserId");
 
@@ -118,6 +169,27 @@ namespace CustomerMonitoringApp.Migrations
                     b.ToTable("UserPermissions");
                 });
 
+            modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.CallHistory", b =>
+                {
+                    b.HasOne("CustomerMonitoringApp.Domain.Entities.User", "CallerUser")
+                        .WithMany()
+                        .HasForeignKey("CallerUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("CustomerMonitoringApp.Domain.Entities.User", "RecipientUser")
+                        .WithMany()
+                        .HasForeignKey("RecipientUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("CustomerMonitoringApp.Domain.Entities.User", null)
+                        .WithMany("CallHistory")
+                        .HasForeignKey("UserId");
+
+                    b.Navigation("CallerUser");
+
+                    b.Navigation("RecipientUser");
+                });
+
             modelBuilder.Entity("UserPermission", b =>
                 {
                     b.HasOne("CustomerMonitoringApp.Domain.Entities.User", "User")
@@ -131,6 +203,8 @@ namespace CustomerMonitoringApp.Migrations
 
             modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.User", b =>
                 {
+                    b.Navigation("CallHistory");
+
                     b.Navigation("UserPermissions");
                 });
 #pragma warning restore 612, 618

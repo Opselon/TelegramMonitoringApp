@@ -22,6 +22,57 @@ namespace CustomerMonitoringApp.Migrations
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
 
+            modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.CallHistory", b =>
+                {
+                    b.Property<int>("CallId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("CallId"));
+
+                    b.Property<DateTime>("CallDateTime")
+                        .HasColumnType("datetime");
+
+                    b.Property<string>("CallType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<int?>("CallerUserId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DestinationPhoneNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<int>("Duration")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(0);
+
+                    b.Property<int?>("RecipientUserId")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SourcePhoneNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
+
+                    b.Property<int?>("UserId")
+                        .HasColumnType("int");
+
+                    b.HasKey("CallId");
+
+                    b.HasIndex("CallerUserId");
+
+                    b.HasIndex("RecipientUserId");
+
+                    b.HasIndex("UserId");
+
+                    b.ToTable("CallHistories");
+                });
+
             modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.User", b =>
                 {
                     b.Property<int>("UserId")
@@ -32,22 +83,26 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("UserAddressFile")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
-                    b.Property<DateTime>("UserBirthDayFile")
+                    b.Property<DateTime?>("UserBirthDayFile")
                         .HasColumnType("datetime2");
 
                     b.Property<string>("UserDescriptionFile")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
 
                     b.Property<string>("UserFamilyFile")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<string>("UserFatherNameFile")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<string>("UserNameFile")
                         .IsRequired()
@@ -56,25 +111,31 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("UserNameProfile")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
 
                     b.Property<string>("UserNumberFile")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<string>("UserSourceFile")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
 
-                    b.Property<int>("UserTelegramID")
-                        .HasColumnType("int");
+                    b.Property<long>("UserTelegramID")
+                        .HasColumnType("bigint");
 
                     b.HasKey("UserId");
+
+                    b.HasIndex("UserTelegramID")
+                        .IsUnique();
 
                     b.ToTable("Users");
                 });
 
-            modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.UserPermission", b =>
+            modelBuilder.Entity("UserPermission", b =>
                 {
                     b.Property<int>("PermissionId")
                         .ValueGeneratedOnAdd()
@@ -84,12 +145,16 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("PermissionDescription")
                         .IsRequired()
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
 
                     b.Property<string>("PermissionType")
                         .IsRequired()
                         .HasMaxLength(50)
                         .HasColumnType("nvarchar(50)");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
 
                     b.Property<int>("UserTelegramID")
                         .HasColumnType("int");
@@ -101,7 +166,28 @@ namespace CustomerMonitoringApp.Migrations
                     b.ToTable("UserPermissions");
                 });
 
-            modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.UserPermission", b =>
+            modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.CallHistory", b =>
+                {
+                    b.HasOne("CustomerMonitoringApp.Domain.Entities.User", "CallerUser")
+                        .WithMany()
+                        .HasForeignKey("CallerUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("CustomerMonitoringApp.Domain.Entities.User", "RecipientUser")
+                        .WithMany()
+                        .HasForeignKey("RecipientUserId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("CustomerMonitoringApp.Domain.Entities.User", null)
+                        .WithMany("CallHistory")
+                        .HasForeignKey("UserId");
+
+                    b.Navigation("CallerUser");
+
+                    b.Navigation("RecipientUser");
+                });
+
+            modelBuilder.Entity("UserPermission", b =>
                 {
                     b.HasOne("CustomerMonitoringApp.Domain.Entities.User", "User")
                         .WithMany("UserPermissions")
@@ -114,6 +200,8 @@ namespace CustomerMonitoringApp.Migrations
 
             modelBuilder.Entity("CustomerMonitoringApp.Domain.Entities.User", b =>
                 {
+                    b.Navigation("CallHistory");
+
                     b.Navigation("UserPermissions");
                 });
 #pragma warning restore 612, 618

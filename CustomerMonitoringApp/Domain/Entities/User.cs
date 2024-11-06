@@ -1,92 +1,102 @@
-﻿namespace CustomerMonitoringApp.Domain.Entities
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
+
+namespace CustomerMonitoringApp.Domain.Entities
 {
     /// <summary>
-    /// Represents a user in the customer monitoring application.
-    /// The User class contains properties that store personal information
-    /// and other relevant details about the user, including their permissions.
+    /// Represents a user in the customer monitoring application. This entity stores
+    /// personal user information along with a collection of permissions related to the user.
     /// </summary>
+    [Index(nameof(UserTelegramID), IsUnique = true)] // Creates a unique index on UserTelegramID
     public class User
     {
         /// <summary>
-        /// Gets or sets the unique identifier for each user.
-        /// This ID is used to differentiate between users in the system.
+        /// Primary key for the User entity. This unique identifier is automatically generated.
         /// </summary>
-        public int UserId { get; set; }  // Unique identifier for each user
+        [Key]
+        public int UserId { get; set; }
 
         /// <summary>
-        /// Gets or sets the user's profile name.
-        /// This property is initialized to an empty string to prevent null reference exceptions.
+        /// The username as displayed in the user's profile. This field is required and
+        /// has a maximum length of 100 characters.
         /// </summary>
-        public string UserNameProfile { get; set; } = string.Empty; // Initialized to avoid null warnings
+        [Required]
+        [StringLength(100)]
+        public string UserNameProfile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the user's number file.
-        /// This property is used to store the identification number or reference for the user.
-        /// Initialized to prevent null reference issues.
+        /// The unique number associated with the user's file. This is an optional field
+        /// with a maximum length of 50 characters.
         /// </summary>
-        public string UserNumberFile { get; set; } = string.Empty;  // Initialized to avoid null warnings
+        [StringLength(50)]
+        public string UserNumberFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the user's name file.
-        /// This property contains the user's first name or given name.
-        /// Initialized to avoid null reference exceptions.
+        /// The first name of the user as recorded in their file. This is a required field
+        /// with a maximum length of 50 characters.
         /// </summary>
-        public string UserNameFile { get; set; } = string.Empty;    // Initialized to avoid null warnings
+        [Required]
+        [StringLength(50)]
+        public string UserNameFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the user's family name file.
-        /// This property holds the user's last name or surname.
-        /// Initialized to ensure it is not null.
+        /// The family name of the user as recorded in their file. This is a required field
+        /// with a maximum length of 50 characters.
         /// </summary>
-        public string UserFamilyFile { get; set; } = string.Empty;  // Initialized to avoid null warnings
+        [Required]
+        [StringLength(50)]
+        public string UserFamilyFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the user's father's name file.
-        /// This property can be used for additional identification or personal context.
-        /// Initialized to prevent null reference exceptions.
+        /// The father's name of the user as recorded in their file. This is an optional field
+        /// with a maximum length of 50 characters.
         /// </summary>
-        public string UserFatherNameFile { get; set; } = string.Empty; // Initialized to avoid null warnings
+        [StringLength(50)]
+        public string UserFatherNameFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the user's birth date.
-        /// This property is a value type, so it cannot be null.
+        /// The birth date of the user. This is an optional field, formatted as a date.
         /// </summary>
-        public DateTime UserBirthDayFile { get; set; } // Considered a value type, cannot be null
+        [DataType(DataType.Date)]
+        public DateTime? UserBirthDayFile { get; set; }
 
         /// <summary>
-        /// Gets or sets the user's address file.
-        /// This property stores the user's residential address.
-        /// Initialized to avoid null warnings.
+        /// The address of the user as recorded in their file. This is an optional field
+        /// with a maximum length of 200 characters.
         /// </summary>
-        public string UserAddressFile { get; set; } = string.Empty;   // Initialized to avoid null warnings
+        [StringLength(200)]
+        public string UserAddressFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets a description of the user.
-        /// This property can hold any additional information about the user.
-        /// Initialized to prevent null reference exceptions.
+        /// Any additional description regarding the user. This is an optional field
+        /// with a maximum length of 500 characters.
         /// </summary>
-        public string UserDescriptionFile { get; set; } = string.Empty; // Initialized to avoid null warnings
+        [StringLength(500)]
+        public string UserDescriptionFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the source of user data.
-        /// This property is used to indicate where the user data was sourced from.
-        /// Initialized to avoid null reference issues.
+        /// The source of the user's data. This is an optional field with a maximum length
+        /// of 100 characters, used to store reference information about data origin.
         /// </summary>
-        public string UserSourceFile { get; set; } = string.Empty;     // Initialized to avoid null warnings
+        [StringLength(100)]
+        public string UserSourceFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Gets or sets the user's unique Telegram ID.
-        /// This property allows for identification of the user in Telegram services.
+        /// The Telegram ID of the user, used as a unique identifier within the application.
+        /// This field is required and must be unique for each user.
         /// </summary>
-        public int UserTelegramID { get; set; }  // Unique Telegram ID, changed to int
+        [Required]
+        public long UserTelegramID { get; set; }
+
+        // New relationship to store the call history
+        public virtual ICollection<CallHistory> CallHistory { get; set; } = new List<CallHistory>();
 
         /// <summary>
         /// Gets or sets the collection of user permissions.
-        /// This navigation property holds the permissions associated with the user.
-        /// The collection is initialized to an empty list to prevent null reference exceptions.
         /// </summary>
-        public virtual ICollection<UserPermission> UserPermissions { get; set; } = new List<UserPermission>();  // Navigation property
-
-
+        public virtual ICollection<UserPermission> UserPermissions { get; set; } = new List<UserPermission>();
     }
 }

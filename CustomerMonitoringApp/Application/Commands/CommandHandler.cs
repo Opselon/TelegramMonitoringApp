@@ -54,13 +54,13 @@ namespace CustomerMonitoringApp.Application.Commands
                 try
                 {
                     // Get the file path from Telegram
-                    var fileInfo = await _botClient.GetFileAsync(message.Document.FileId);
+                    var fileInfo = await _botClient.GetFile(message.Document.FileId);
 
                     // Create a stream to save the file
                     using (var fileStream = new FileStream(fileInfo.FilePath, FileMode.Create))
                     {
                         // Download the file from Telegram
-                        await _botClient.DownloadFileAsync(fileInfo.FilePath, fileStream);
+                        await _botClient.DownloadFile(fileInfo.FilePath, fileStream);
                     }
 
                     // Use the ExcelReaderService to parse the Excel file
@@ -89,12 +89,12 @@ namespace CustomerMonitoringApp.Application.Commands
                     }
 
                     // Notify the user that the file has been processed
-                    await _botClient.SendTextMessageAsync(message.Chat.Id, "File processed and users added to the database.");
+                    await _botClient.SendMessage(message.Chat.Id, "File processed and users added to the database.");
                 }
                 catch (Exception ex)
                 {
                     // Log the exception and notify the user of the error
-                    await _botClient.SendTextMessageAsync(message.Chat.Id, "An error occurred while processing the file.");
+                    await _botClient.SendMessage(message.Chat.Id, "An error occurred while processing the file.");
                     // Log the exception details (e.g., using a logging framework)
                 }
             }

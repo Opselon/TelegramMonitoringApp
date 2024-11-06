@@ -1,13 +1,17 @@
 ﻿using System;
+using System.Configuration; // Add this using directive
+using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.EntityFrameworkCore;
+using System.Windows;
 using CustomerMonitoringApp.Application.Services;
 using CustomerMonitoringApp.Infrastructure.Data;
 using CustomerMonitoringApp.Infrastructure.Repositories;
-using Microsoft.EntityFrameworkCore;
-using System.Windows;
 using CustomerMonitoringApp.Domain.Interfaces;
 using CustomerMonitoringApp.WPFApp;
+using Microsoft.Data.SqlClient;
 
 namespace CustomerMonitoringApp
 {
@@ -21,42 +25,87 @@ namespace CustomerMonitoringApp
         /// Initializes the application and sets up the dependency injection container.
         /// </summary>
         /// <param name="e">The event data for the startup event.</param>
-        protected override void OnStartup(StartupEventArgs e)
+        protected override async void OnStartup(StartupEventArgs e)
         {
             // Create a host builder to set up application services and configuration
             var host = Host.CreateDefaultBuilder()
                 .ConfigureServices((context, services) =>
                 {
-                    // Configure the DbContext with SQL Server using a connection string
+                    // Retrieve the connection string from App.config
+                    var connectionString = ConfigurationManager.ConnectionStrings["DefaultConnection"].ConnectionString;
+
+                    if (string.IsNullOrEmpty(connectionString))
+                    {
+                        throw new InvalidOperationException("The connection string 'DefaultConnection' is not configured.");
+                    }
+
+                    // Log the connection string (for debugging purposes only; avoid logging sensitive info in production)
+                    Console.WriteLine($"Connection String: {connectionString}");
+
+                    // Configure DbContext with SQL Server using the connection string
                     services.AddDbContext<AppDbContext>(options =>
-                        options.UseSqlServer("Data Source=.;Integrated Security=True;Trust Server Certificate=True")); // Replace with your actual connection string
+                        options.UseSqlServer(connectionString));
 
-                    // Register the repositories for dependency injection
-                    services.AddScoped<IUserRepository, UserRepository>(); // Scoped lifetime for user repository
-                    services.AddScoped<IUserPermissionRepository, UserPermissionRepository>(); // Scoped lifetime for user permission repository
-
-                    // Register application services
-                    services.AddScoped<UserService>(); // Scoped lifetime for user service
-
-                    // Register the main window as a singleton to ensure one instance exists
+                    // Register repositories and services for dependency injection
+                    services.AddScoped<IUserRepository, UserRepository>();
+                    services.AddScoped<IUserPermissionRepository, UserPermissionRepository>();
+                    services.AddScoped<UserService>();
+        
+                    // Register the main window as a singleton
                     services.AddSingleton<MainWindow>();
-                })
-                .Build(); // Build the host with the configured services
 
-            // Ensure the database is created and migrations are applied at startup
+                    // Configure logging
+                    services.AddLogging(configure =>
+                    {
+                        configure.AddConsole();
+                        configure.AddDebug(); // Add debug logging
+                    });
+                })
+                .Build();
+
+            // Ensure the database is created and migrations are applied at startup asynchronously
+            await ApplyDatabaseMigrationsAsync(host);
+
+            // Run the host, which starts the application and handles lifetime events
+            await host.RunAsync(); // Use RunAsync for better async handling
+        }
+
+        /// <summary>
+        /// Applies pending database migrations and ensures the database is created.
+        /// </summary>
+        /// <param name="host">The host that contains the services.</param>
+        private async Task ApplyDatabaseMigrationsAsync(IHost host)
+        {
             using (var scope = host.Services.CreateScope())
             {
                 var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                // Apply any pending migrations to the database
-                dbContext.Database.Migrate();
+                var logger = scope.ServiceProvider.GetRequiredService<ILogger<App>>();
+
+                try
+                {
+                    // Log migration start
+                    logger.LogInformation("Applying database migrations...");
+
+                    // Ensure the database is created
+                    await dbContext.Database.EnsureCreatedAsync();
+
+                    // Apply any pending migrations
+                    await dbContext.Database.MigrateAsync();
+
+                    // Log migration complete
+                    logger.LogInformation("Database migrations applied successfully.");
+                }
+                catch (SqlException sqlEx)
+                {
+                    // Log SQL exceptions specifically
+                    logger.LogError(sqlEx, "SQL error occurred while applying migrations: {Message}", sqlEx.Message);
+                }
+                catch (Exception ex)
+                {
+                    // Log any other exceptions that occur
+                    logger.LogError(ex, "Error applying migrations: {Message}", ex.Message);
+                }
             }
-
-            // Resolve the main window from the service provider and show it
-            var mainWindow = host.Services.GetRequiredService<MainWindow>();
-            mainWindow.Show();
-
-            // Run the host, which starts the application and handles lifetime events
-            host.Run();
         }
     }
 }
