@@ -1,42 +1,33 @@
-﻿using CustomerMonitoringApp.Domain.Entities;
-using CustomerMonitoringApp.Domain.Interfaces;
-using Microsoft.EntityFrameworkCore;
-using Polly;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using OfficeOpenXml;
 using Microsoft.Extensions.Logging;
+using OfficeOpenXml;
+using Polly;
 using System.Transactions;
+using CustomerMonitoringApp.Domain.Entities;
+using CustomerMonitoringApp.Domain.Interfaces;
+using System.Globalization;
 
 namespace CustomerMonitoringApp.Application.Services
 {
-    /// <summary>
-    /// Service responsible for processing and importing CallHistory data from an Excel file.
-    /// </summary>
-    public class CallHistoryImportService
+    // Ensure that the class is public so it can be used by other parts of the application.
+    public class CallHistoryImportService : ICallHistoryImportService
     {
-        private readonly ICallHistoryRepository _callHistoryRepository;
         private readonly ILogger<CallHistoryImportService> _logger;
+        private readonly ICallHistoryRepository _callHistoryRepository;
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="CallHistoryImportService"/> class.
-        /// </summary>
-        /// <param name="callHistoryRepository">The repository to interact with the CallHistory data.</param>
-        /// <param name="logger">The logger to log the process.</param>
-        public CallHistoryImportService(ICallHistoryRepository callHistoryRepository, ILogger<CallHistoryImportService> logger)
+        // Injecting the logger and repository through the constructor.
+        public CallHistoryImportService(ILogger<CallHistoryImportService> logger, ICallHistoryRepository callHistoryRepository)
         {
-            _callHistoryRepository = callHistoryRepository ?? throw new ArgumentNullException(nameof(callHistoryRepository));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+            _callHistoryRepository = callHistoryRepository ?? throw new ArgumentNullException(nameof(callHistoryRepository));
+            _logger.LogInformation("CallHistoryImportService initialized.");
         }
 
-        /// <summary>
-        /// Processes the Excel file and imports the CallHistory records into the database with retry and transaction support.
-        /// </summary>
-        /// <param name="filePath">The file path of the Excel document.</param>
-        /// <returns>Task representing the asynchronous operation.</returns>
+        // Public method to process the Excel file.
         public async Task ProcessExcelFileAsync(string filePath)
         {
             if (string.IsNullOrEmpty(filePath))
@@ -47,104 +38,11 @@ namespace CustomerMonitoringApp.Application.Services
 
             try
             {
-                // Read the Excel file into a list of CallHistory records
-                var records = new List<CallHistory>();
-
-                // Open the Excel package
-                using (var package = new ExcelPackage(new FileInfo(filePath)))
-                {
-                    // Ensure there are worksheets in the file
-                    if (package.Workbook.Worksheets.Count == 0)
-                    {
-                        throw new InvalidOperationException("No worksheets found in the Excel file.");
-                    }
-
-                    var worksheet = package.Workbook.Worksheets[0]; // Assuming the first sheet is the data
-                    var rowCount = worksheet.Dimension.Rows;
-
-                    // Validate if data starts from row 2 (skipping headers)
-                    if (rowCount < 2)
-                    {
-                        throw new InvalidOperationException("File contains too few rows.");
-                    }
-
-                    // Start from row 2 to skip headers (row 1)
-                    for (int row = 2; row <= rowCount; row++)
-                    {
-                        // Validate row data
-                        var sourcePhone = worksheet.Cells[row, 1].Text.Trim();
-                        var destinationPhone = worksheet.Cells[row, 2].Text.Trim();
-                        var callDate = worksheet.Cells[row, 3].Text.Trim();
-                        var callTime = worksheet.Cells[row, 4].Text.Trim();
-                        var durationText = worksheet.Cells[row, 5].Text.Trim();
-                        var callType = worksheet.Cells[row, 6].Text.Trim();
-
-                        if (string.IsNullOrWhiteSpace(sourcePhone) || string.IsNullOrWhiteSpace(destinationPhone) ||
-                            string.IsNullOrWhiteSpace(callDate) || string.IsNullOrWhiteSpace(callTime) ||
-                            string.IsNullOrWhiteSpace(durationText) || string.IsNullOrWhiteSpace(callType))
-                        {
-                            _logger.LogWarning($"Skipping row {row} due to missing data.");
-                            continue; // Skip this row and move to the next one
-                        }
-
-                        // Parse and validate each field
-                        if (!DateTime.TryParseExact(callDate + " " + callTime, "yyyy/MM/dd HH:mm", null, System.Globalization.DateTimeStyles.None, out DateTime callDateTime))
-                        {
-                            _logger.LogWarning($"Skipping row {row} due to invalid date/time format.");
-                            continue; // Skip row with invalid date/time
-                        }
-
-                        if (!int.TryParse(durationText, out int duration))
-                        {
-                            _logger.LogWarning($"Skipping row {row} due to invalid duration.");
-                            continue; // Skip row with invalid duration
-                        }
-
-                        var record = new CallHistory
-                        {
-                            SourcePhoneNumber = sourcePhone,
-                            DestinationPhoneNumber = destinationPhone,
-                            CallDateTime = callDateTime,
-                            Duration = duration,
-                            CallType = callType
-                        };
-
-                        records.Add(record);
-                    }
-                }
+                var records = await ParseExcelFileAsync(filePath);
 
                 if (records.Any())
                 {
-                    // Retry logic using Polly
-                    var retryPolicy = Policy
-                        .Handle<Exception>()
-                        .WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)), (exception, timeSpan, context) =>
-                        {
-                            _logger.LogError($"Error during file processing: {exception.Message}. Retrying in {timeSpan.TotalSeconds} seconds.");
-                        });
-
-                    // Wrap the database operation in a transaction and ensure atomicity
-                    await retryPolicy.ExecuteAsync(async () =>
-                    {
-                        using (var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
-                        {
-                            try
-                            {
-                                // Save the extracted records to the database
-                                await _callHistoryRepository.AddCallHistoryAsync(records);
-
-                                // Commit transaction
-                                transaction.Complete();
-                                _logger.LogInformation("File processed and data saved to database.");
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogError($"Error saving data to database: {ex.Message}. Rolling back transaction.");
-                                // Ensure the transaction is rolled back automatically when an error occurs
-                                throw; // Re-throw the exception to trigger the retry policy
-                            }
-                        }
-                    });
+                    await SaveRecordsWithRetryAsync(records);
                 }
                 else
                 {
@@ -154,7 +52,7 @@ namespace CustomerMonitoringApp.Application.Services
             catch (FileNotFoundException fnfEx)
             {
                 _logger.LogError($"File not found: {fnfEx.Message}");
-                throw; // Rethrow for external handling if needed
+                throw;
             }
             catch (InvalidOperationException ioEx)
             {
@@ -164,8 +62,219 @@ namespace CustomerMonitoringApp.Application.Services
             catch (Exception ex)
             {
                 _logger.LogError($"Error processing file: {ex.Message}");
-                throw; // Rethrow for external handling if needed
+                throw;
             }
+        }
+
+        // Method to parse the Excel file
+        private async Task<List<CallHistory>> ParseExcelFileAsync(string filePath)
+        {
+            var records = new List<CallHistory>();
+
+            try
+            {
+                if (!File.Exists(filePath))
+                {
+                    _logger.LogError($"The file '{filePath}' does not exist.");
+                    return records;
+                }
+
+                using (var package = new ExcelPackage(new FileInfo(filePath)))
+                {
+                    var worksheets = package.Workbook.Worksheets;
+                    if (worksheets.Count == 0)
+                    {
+                        _logger.LogError("The Excel file contains no worksheets.");
+                        return records;
+                    }
+
+                    _logger.LogInformation($"The workbook contains {worksheets.Count} worksheet(s).");
+
+                    var worksheet = worksheets.FirstOrDefault();
+                    if (worksheet == null)
+                    {
+                        _logger.LogError("No valid worksheet found in the workbook.");
+                        return records;
+                    }
+
+                    if (worksheet.Dimension == null || worksheet.Dimension.Rows <= 1 || worksheet.Dimension.Columns == 0)
+                    {
+                        _logger.LogError("The worksheet is empty, has no rows, or invalid columns.");
+                        return records;
+                    }
+
+                    var rowCount = worksheet.Dimension.Rows;
+                    var colCount = worksheet.Dimension.Columns;
+                    _logger.LogInformation($"The worksheet has {rowCount} rows and {colCount} columns.");
+
+                    // Add logging for rows processed
+                    for (int row = 2; row <= rowCount; row++)
+                    {
+                        _logger.LogInformation($"Processing row {row} of {rowCount}.");
+                        var rowValues = worksheet.Cells[row, 1, row, colCount].Select(c => c.Text.Trim()).ToList();
+                        if (rowValues.All(string.IsNullOrEmpty))
+                        {
+                            _logger.LogInformation($"Skipping empty row {row}.");
+                            continue;
+                        }
+
+                        var record = await ParseRowAsync(worksheet, row);
+                        if (record != null)
+                        {
+                            records.Add(record);
+                        }
+                        else
+                        {
+                            _logger.LogWarning($"Row {row} could not be parsed.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Error parsing Excel file: {ex.Message}");
+                throw;
+            }
+
+            _logger.LogInformation($"Total records parsed: {records.Count}");
+            return records;
+        }
+
+        // Method to parse a single row from Excel
+        private async Task<CallHistory> ParseRowAsync(ExcelWorksheet worksheet, int row)
+        {
+            try
+            {
+                var sourcePhone = worksheet.Cells[row, 1].Text.Trim();
+                var destinationPhone = worksheet.Cells[row, 2].Text.Trim();
+                var persianDate = worksheet.Cells[row, 3].Text.Trim();
+                var callTime = worksheet.Cells[row, 4].Text.Trim();
+                var durationText = worksheet.Cells[row, 5].Text.Trim();
+                var callType = worksheet.Cells[row, 6].Text.Trim();
+
+                _logger.LogInformation($"Row {row} - SourcePhone: {sourcePhone}, DestinationPhone: {destinationPhone}, CallDate: {persianDate}, CallTime: {callTime}, Duration: {durationText}, CallType: {callType}");
+
+                // Handle missing or invalid fields
+                if (string.IsNullOrWhiteSpace(sourcePhone) || string.IsNullOrWhiteSpace(destinationPhone) ||
+                    string.IsNullOrWhiteSpace(persianDate) || string.IsNullOrWhiteSpace(callTime) ||
+                    string.IsNullOrWhiteSpace(durationText) || string.IsNullOrWhiteSpace(callType))
+                {
+                    _logger.LogWarning($"Skipping row {row} due to missing data.");
+                    return null;
+                }
+
+                // Convert Persian date to Gregorian DateTime
+                DateTime callDateTime;
+                if (!TryParsePersianDate(persianDate, callTime, out callDateTime))
+                {
+                    _logger.LogWarning($"Skipping row {row} due to invalid date/time format.");
+                    return null;
+                }
+
+                // Parse duration (allowing zero duration for SMS)
+                int duration = 0;
+                if (!int.TryParse(durationText, out duration) || duration < 0)
+                {
+                    _logger.LogWarning($"Skipping row {row} due to invalid duration.");
+                    return null;
+                }
+
+                // Normalize call type to English or preferred format
+                string normalizedCallType = NormalizeCallType(callType);
+
+                var record = new CallHistory
+                {
+                    SourcePhoneNumber = sourcePhone,
+                    DestinationPhoneNumber = destinationPhone,
+                    CallDateTime = callDateTime,
+                    Duration = duration,
+                    CallType = normalizedCallType
+                };
+
+                return record;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Error parsing row {row}: {ex.Message}");
+                return null;
+            }
+        }
+        // Method to try parsing Persian date format (convert to Gregorian)
+        private bool TryParsePersianDate(string persianDate, string time, out DateTime result)
+        {
+            result = DateTime.MinValue;
+
+            try
+            {
+                // Persian to Gregorian conversion (simplified)
+                var persianDateParts = persianDate.Split('/');
+                if (persianDateParts.Length == 3)
+                {
+                    int year = int.Parse(persianDateParts[0]);
+                    int month = int.Parse(persianDateParts[1]);
+                    int day = int.Parse(persianDateParts[2]);
+
+                    // Create a Persian calendar and convert to Gregorian
+                    PersianCalendar pc = new PersianCalendar();
+                    result = pc.ToDateTime(year, month, day, 0, 0, 0, 0);
+
+                    // Adjust the time part (HH:mm) to the date
+                    var timeParts = time.Split(':');
+                    if (timeParts.Length == 2)
+                    {
+                        result = new DateTime(result.Year, result.Month, result.Day, int.Parse(timeParts[0]), int.Parse(timeParts[1]), 0);
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                _logger.LogWarning($"Failed to parse Persian date {persianDate}.");
+            }
+
+            return false;
+        }
+
+        // Method to normalize the call type string to English or a preferred format
+        private string NormalizeCallType(string callType)
+        {
+            switch (callType)
+            {
+                case "پیام کوتاه": return "SMS";
+                case "تماس صوتی": return "Voice Call";
+                default: return callType;
+            }
+        }
+
+
+        // Method to save records to the database with retry policy
+        private async Task SaveRecordsWithRetryAsync(List<CallHistory> records)
+        {
+            var retryPolicy = Policy
+                .Handle<Exception>()
+                .WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                    (exception, timeSpan, context) =>
+                    {
+                        _logger.LogError($"Error during file processing: {exception.Message}. Retrying in {timeSpan.TotalSeconds} seconds.");
+                    });
+
+            await retryPolicy.ExecuteAsync(async () =>
+            {
+                using (var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled))
+                {
+                    try
+                    {
+                        await _callHistoryRepository.AddCallHistoryAsync(records);
+                        transaction.Complete();
+                        _logger.LogInformation("File processed and data saved to database.");
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"Error saving data to database: {ex.Message}. Rolling back transaction.");
+                        throw;
+                    }
+                }
+            });
         }
     }
 }

@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace CustomerMonitoringApp.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20241106063403_newdb")]
-    partial class newdb
+    [Migration("20241107153251_InitialCreate")]
+    partial class InitialCreate
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)

@@ -6,26 +6,11 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace CustomerMonitoringApp.Migrations
 {
     /// <inheritdoc />
-    public partial class newdb : Migration
+    public partial class InitialCreate : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            // Drop foreign key constraints that reference the Users table
-            migrationBuilder.Sql(@"
-        DECLARE @sql NVARCHAR(MAX) = N'';
-        SELECT @sql += 'ALTER TABLE ' + t.name + ' DROP CONSTRAINT ' + fk.name + ';'
-        FROM sys.foreign_keys fk
-        INNER JOIN sys.tables t ON fk.parent_object_id = t.object_id
-        WHERE fk.referenced_object_id = OBJECT_ID('dbo.Users');
-        EXEC sp_executesql @sql;
-    ");
-            // Drop the 'UserPermissions' table if it exists
-            migrationBuilder.Sql("IF OBJECT_ID('dbo.UserPermissions', 'U') IS NOT NULL DROP TABLE dbo.UserPermissions;");
-
-            // Drop the 'Users' table if it exists
-            migrationBuilder.Sql("IF OBJECT_ID('dbo.Users', 'U') IS NOT NULL DROP TABLE dbo.Users;");
-
             migrationBuilder.CreateTable(
                 name: "Users",
                 columns: table => new

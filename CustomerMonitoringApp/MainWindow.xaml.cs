@@ -29,19 +29,43 @@ using Telegram.Bot.Types.ReplyMarkups;
 using Color = System.Windows.Media.Color;
 using File = System.IO.File;
 using Run = System.Windows.Documents.Run;
-
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
+using CustomerMonitoringApp.Domain.Entities;
+using System.Formats.Asn1;
+using System.Text;
+using CsvHelper;
+using CsvHelper.Configuration;
+using User = CustomerMonitoringApp.Domain.Entities.User;
 namespace CustomerMonitoringApp.WPFApp
 {
+
     public partial class MainWindow : Window
     {
+        public MainWindow() : this(
+
+            App.Services.GetRequiredService<ILogger<MainWindow>>(),
+            App.Services.GetRequiredService<ICallHistoryRepository>(),
+            App.Services.GetRequiredService<IServiceProvider>(),
+            App.Services.GetRequiredService<NotificationService>(),
+            App.Services.GetRequiredService<ICallHistoryImportService>())
+        {
+            LoadUsersFromDatabaseAsync();
+            InitializeBotClient();
+            InitializeComponent();
+            InitializeButton();
+        }
+
         #region Fields and Properties
+        private static readonly Regex FileNameRegex = new Regex(@"^(Getcalls|Getrecentcalls|Getlongcalls)_\d{10,}_\d{8}_\d{6}\.csv$", RegexOptions.Compiled);
+
         private readonly ILogger<MainWindow> _logger;
         private CancellationTokenSource _cancellationTokenSource;
         private ITelegramBotClient _botClient;
         private readonly NotificationService _notificationService;
         private readonly string
             _token = "6768055952:AAGSETUCUC76eXuSoAGX6xcsQk1rrt0K4Ng"; // Replace with your actual bot token
-        private readonly CallHistoryImportService _callHistoryImportService;
+        private readonly ICallHistoryImportService _callHistoryImportService;
         private readonly IServiceProvider _serviceProvider;
         private readonly ICallHistoryRepository _callHistoryRepository;
 
@@ -49,32 +73,21 @@ namespace CustomerMonitoringApp.WPFApp
 
         #region Constructor
 
-        public MainWindow()
-        {
-
-            InitializeComponent();
-            InitializeBotClient();
-            InitializeButton();
-            LoadUsersFromDatabaseAsync();
-        }
-
         public MainWindow(
             ILogger<MainWindow> logger,
             ICallHistoryRepository callHistoryRepository,
             IServiceProvider serviceProvider,
             NotificationService notificationService,
-            CallHistoryImportService callHistoryImportService)
+            ICallHistoryImportService callHistoryImportService)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _callHistoryRepository = callHistoryRepository ?? throw new ArgumentNullException(nameof(callHistoryRepository));
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
             _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
             _callHistoryImportService = callHistoryImportService ?? throw new ArgumentNullException(nameof(callHistoryImportService));
+
         }
-        #endregion
-
-        #region Bot Initialization
-
+     
         /// <summary>
         /// Initializes the bot client and verifies if the token is valid.
         /// </summary>
@@ -235,158 +248,455 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
 
-private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
-{
-    var chatId = update.Message?.Chat.Id;
-    var startTime = DateTime.UtcNow; // Start time for processing metrics
-
-    if (chatId == null)
-    {
-        Log("Error: chatId is null.");
-        return;
-    }
-
-    try
-    {
-        // Validate the update type and file extension
-        if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Document)
+        private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update,
+            CancellationToken cancellationToken)
         {
-            var document = update.Message.Document;
+            var chatId = update.Message?.Chat?.Id;
+            var startTime = DateTime.UtcNow; // Start time for processing metrics
 
-            if (document != null && Path.GetExtension(document.FileName).Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
+            if (chatId == null)
             {
-                // Inform the user that the file is being processed
-                await botClient.SendMessage(
-                    chatId: chatId.Value,
-                    text: "📥 Received your .xlsx file! Processing...",
-                    cancellationToken: cancellationToken
-                );
-                Log($"Received .xlsx file from user {chatId}: {document.FileName}");
+                Log("Error: chatId is null.");
+                return;
+            }
+            // Handle Text Commands for Call History CSV Generation
+            if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Text)
+            {
+                var messageText = update.Message.Text;
+                var commandParts = messageText.Split(' ');
+                var command = commandParts[0].ToLower();
 
-                // Step 1: Download the file
-                string filePath;
                 try
                 {
-                    filePath = await DownloadFileAsync(document, cancellationToken);
-                    Log($"File downloaded successfully: {filePath}");
+                    switch (command)
+                    {
+                        case "/getcalls":
+                            await HandleGetCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            break;
+                        case "/getrecentcalls":
+                            await HandleGetRecentCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            break;
+                        case "/getlongcalls":
+                            await HandleGetLongCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            break;
+                        case "/getafterhourscalls":
+                            await HandleGetAfterHoursCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            break;
+                        case "/getfrequentcalldates":
+                            await HandleGetFrequentCallDatesCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            break;
+                        case "/gettoprecentcalls":
+                            await HandleGetTopRecentCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            break;
+                        case "/hasrecentcall":
+                            await HandleHasRecentCallCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            break;
+                        default:
+                            await botClient.SendMessage(
+                                chatId: chatId.Value,
+                                text: "🤔 *Unknown Command*\n\nIt looks like you've entered a command I don't recognize. Please try one of the following supported commands:\n\n" +
+                                      "📞 /getcalls - _Retrieve a full history of calls_\n" +
+                                      "📅 /getrecentcalls - _Get recent call records_\n" +
+                                      "⏳ /getlongcalls - _Find calls longer than a specified duration_\n" +
+                                      "🔝 /gettoprecentcalls - _View the top N most recent calls_\n" +
+                                      "🕒 /hasrecentcall - _Check if a number was contacted within a time span_\n\n" +
+                                      "If you need more help, use `/help` for a full list of commands and details on their usage. 😊",
+                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                                cancellationToken: cancellationToken
+                            );
+                            break;
+                    }
                 }
-                catch (Exception downloadEx)
+                catch (Exception ex)
                 {
-                    Log($"Error downloading file from user {chatId}: {downloadEx.Message}");
+                    Log($"Error handling command '{command}' for user {chatId}: {ex.Message}");
                     await botClient.SendMessage(
                         chatId: chatId.Value,
-                        text: "❌ Error downloading the file. Please try again.",
+                        text: $"❌ Error processing command: {ex.Message}",
                         cancellationToken: cancellationToken
                     );
-                    return;
                 }
+            }
 
-                // Step 3: Identify file type (CallHistory or UsersUpdate)
-                bool isCallHistory = await IsCallHistoryFileAsync(filePath);
-                bool isUserFile = await IsUserFile(filePath);
-
-                if (isCallHistory)
+            try
+            {
+                // Validate the update type and file extension
+                if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Document)
                 {
-                    // Process CallHistory data
-                    try
+                    var document = update.Message.Document;
+
+                    if (document != null && Path.GetExtension(document.FileName)
+                            .Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
                     {
-                        // Use _callHistoryImportService to process the file
-                        await _callHistoryImportService.ProcessExcelFileAsync(filePath);
-                        Log($"File processed and call history data saved: {filePath}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Error processing CallHistory data for user {chatId}: {ex.Message}");
+                        // Inform the user that the file is being processed
                         await botClient.SendMessage(
                             chatId: chatId.Value,
-                            text: $"❌ Failed to import CallHistory data. Please ensure the file format is correct. Error: {ex.Message}",
+                            text: "📥 Received your .xlsx file! Processing...",
                             cancellationToken: cancellationToken
                         );
-                        return;
-                    }
-                }
-                else if (isUserFile)
-                {
-                    // Process Users Update data
-                    try
-                    {
-                        await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
-                        Log($"File processed and users data saved: {filePath}");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Error processing Users data for user {chatId}: {ex.Message}");
+                        Log($"Received .xlsx file from user {chatId}: {document.FileName}");
+
+                        // Step 1: Download the file
+                        string filePath;
+                        try
+                        {
+                            filePath = await DownloadFileAsync(document, cancellationToken);
+                            Log($"File downloaded successfully: {filePath}");
+                            await botClient.SendMessage(
+                                chatId: chatId.Value,
+                                text: "🧲 File downloaded successfully",
+                                cancellationToken: cancellationToken
+                            );
+                        }
+                        catch (Exception downloadEx)
+                        {
+                            Log($"Error downloading file from user {chatId}: {downloadEx.Message}");
+                            await botClient.SendMessage(
+                                chatId: chatId.Value,
+                                text: "❌ Error downloading the file. Please try again.",
+                                cancellationToken: cancellationToken
+                            );
+                            return;
+                        }
+       
+                        // Step 3: Identify file type (CallHistory or UsersUpdate)
+                        bool isCallHistory = await IsCallHistoryFileAsync(filePath);
+                        bool isUserFile = await IsUserFile(filePath);
+                        // 2. Add the parsed data to the repository (saving to database)
+
+                        if (isCallHistory)
+                        {
+                            try
+                            {
+
+
+                                if (botClient == null)
+                                {
+                                    throw new InvalidOperationException("botClient is not initialized.");
+                                }
+
+                                if (!chatId.HasValue)
+                                {
+                                    throw new ArgumentNullException(nameof(chatId), "chatId is not provided.");
+                                }
+
+
+                                // Try processing the CallHistory file
+                                await _callHistoryImportService.ProcessExcelFileAsync(filePath);
+                                Log($"Successfully processed CallHistory data: {filePath}");
+
+                                await botClient.SendMessage(
+                                    chatId: chatId.Value,
+                                    text: "✅ File processed and data imported successfully!",
+                                    cancellationToken: cancellationToken
+                                );
+                            }
+                            catch (ArgumentException argEx)
+                            {
+                                Log($"Invalid argument error: {argEx.Message}");
+                                await botClient.SendMessage(
+                                    chatId: chatId.Value,
+                                    text: $"❌ Invalid file or input. Error: {argEx.Message}",
+                                    cancellationToken: cancellationToken
+                                );
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"General error processing CallHistory data: {ex.Message}");
+                                await botClient.SendMessage(
+                                    chatId: chatId.Value,
+                                    text: $"❌ Internal error during data import. Error: {ex.Message}",
+                                    cancellationToken: cancellationToken
+                                );
+                            }
+                        }
+
+                        else if (isUserFile)
+                        {
+                            // Process Users Update data
+                            try
+                            {
+                                await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
+                                Log($"File processed and users data saved: {filePath}");
+                            }
+                            catch (Exception ex)
+                            {
+                                Log($"Error processing Users data for user {chatId}: {ex.Message}");
+                                await botClient.SendMessage(
+                                    chatId: chatId.Value,
+                                    text: "❌ Failed to import Users data. Please ensure the file format is correct.",
+                                    cancellationToken: cancellationToken
+                                );
+                                return;
+                            }
+                        }
+                        else
+                        {
+                            // Handle unsupported file types
+                            await botClient.SendMessage(
+                                chatId: chatId.Value,
+                                text: "⚠️ The file type is not supported. Please upload a valid .xlsx file.",
+                                cancellationToken: cancellationToken
+                            );
+                            Log($"User {chatId} uploaded an unsupported file type: {document?.FileName}");
+                            return;
+                        }
+
+                        // Step 4: Inform the user of success and provide summary
                         await botClient.SendMessage(
                             chatId: chatId.Value,
-                            text: "❌ Failed to import Users data. Please ensure the file format is correct.",
+                            text: "✅ File processed and data imported successfully!",
                             cancellationToken: cancellationToken
                         );
-                        return;
+                        Log($"User {chatId} was informed of successful processing.");
+                    }
+                    else
+                    {
+                        // Handle incorrect file types with detailed feedback
+                        await botClient.SendMessage(
+                            chatId: chatId.Value,
+                            text: "⚠️ Please upload a valid .xlsx file.",
+                            cancellationToken: cancellationToken
+                        );
+                        Log($"User {chatId} attempted to upload an invalid file type: {document?.FileName}");
                     }
                 }
                 else
                 {
-                    // Handle unsupported file types
+                    Log("Received unsupported update type.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Unhandled error in HandleUpdateAsync for user {chatId}: {ex.Message}");
+                if (chatId != null)
+                {
                     await botClient.SendMessage(
                         chatId: chatId.Value,
-                        text: "⚠️ The file type is not supported. Please upload a valid .xlsx file.",
+                        text: "❌ An unexpected error occurred while processing your file. Please try again later.",
                         cancellationToken: cancellationToken
                     );
-                    Log($"User {chatId} uploaded an unsupported file type: {document?.FileName}");
-                    return;
                 }
-
-                // Step 4: Inform the user of success and provide summary
-                await botClient.SendMessage(
-                    chatId: chatId.Value,
-                    text: "✅ File processed and data imported successfully!",
-                    cancellationToken: cancellationToken
-                );
-                Log($"User {chatId} was informed of successful processing.");
             }
-            else
+            finally
             {
-                // Handle incorrect file types with detailed feedback
-                await botClient.SendMessage(
-                    chatId: chatId.Value,
-                    text: "⚠️ Please upload a valid .xlsx file.",
-                    cancellationToken: cancellationToken
-                );
-                Log($"User {chatId} attempted to upload an invalid file type: {document?.FileName}");
+                // Calculate processing duration and log for performance analysis
+                var duration = DateTime.UtcNow - startTime;
+                Log($"Completed file processing for user {chatId} in {duration.TotalSeconds} seconds.");
+            }
+
+            // Handle CallbackQuery if applicable
+            if (update.Type == UpdateType.CallbackQuery)
+            {
+                await HandleCallbackQueryAsync(botClient, update.CallbackQuery, cancellationToken);
+                return; // Exit early after handling the callback
             }
         }
-        else
+        private async Task HandleHasRecentCallCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
         {
-            Log("Received unsupported update type.");
+            // Ensure the user provided a valid phone number and a time span
+            if (commandParts.Length < 3 || !TimeSpan.TryParse(commandParts[2], out TimeSpan timeSpan))
+            {
+                await botClient.SendMessage(chatId, "Usage: /hasrecentcall [phoneNumber] [timeSpan]", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+
+            // Check if the phone number has a recent call within the specified time window
+            var hasRecentCall = await _callHistoryRepository.HasRecentCallWithinTimeSpanAsync(phoneNumber, timeSpan);
+
+            // Send feedback to the user
+            var message = hasRecentCall
+                ? $"✅ The phone number {phoneNumber} has had a recent call within the last {timeSpan.TotalMinutes} minutes."
+                : $"❌ No recent calls found for {phoneNumber} within the last {timeSpan.TotalMinutes} minutes.";
+
+            await botClient.SendMessage(chatId, message, cancellationToken: cancellationToken);
         }
-    }
-    catch (Exception ex)
-    {
-        Log($"Unhandled error in HandleUpdateAsync for user {chatId}: {ex.Message}");
-        if (chatId != null)
+
+        private async Task HandleGetTopRecentCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
         {
-            await botClient.SendMessage(
-                chatId: chatId.Value,
-                text: "❌ An unexpected error occurred while processing your file. Please try again later.",
-                cancellationToken: cancellationToken
-            );
+            // Ensure the user provided a phone number and the number of rows (calls)
+            if (commandParts.Length < 3 || !int.TryParse(commandParts[2], out int topN))
+            {
+                await botClient.SendMessage(chatId, "Usage: /gettoprecentcalls [phoneNumber] [numberOfCalls]", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+
+            // Get the top N most recent calls for the phone number
+            var topRecentCalls = await _callHistoryRepository.GetTopNRecentCallsAsync(phoneNumber, topN);
+
+            // If no calls are found, send a message to the user
+            if (!topRecentCalls.Any())
+            {
+                await botClient.SendMessage(chatId, $"No recent calls found for {phoneNumber}.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Generate a CSV file for the top recent calls
+            var csvFilePath = GenerateCsv(topRecentCalls);
+
+            // Send the CSV file to the user
+            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+            await botClient.SendDocument(chatId, new InputFileStream(stream, "TopRecentCalls.csv"), cancellationToken: cancellationToken);
+
+            // Clean up by deleting the file after sending
+            File.Delete(csvFilePath);
         }
-    }
-    finally
-    {
-        // Calculate processing duration and log for performance analysis
-        var duration = DateTime.UtcNow - startTime;
-        Log($"Completed file processing for user {chatId} in {duration.TotalSeconds} seconds.");
-    }
 
-    // Handle CallbackQuery if applicable
-    if (update.Type == UpdateType.CallbackQuery)
-    {
-        await HandleCallbackQueryAsync(botClient, update.CallbackQuery, cancellationToken);
-        return; // Exit early after handling the callback
-    }
-}
 
+        private async Task HandleGetAfterHoursCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            if (commandParts.Length < 4)
+            {
+                await botClient.SendMessage(chatId, "Please provide a phone number, start time, and end time. Example: /getafterhourscalls +1234567890 18:00 06:00", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+            var startTime = TimeSpan.Parse(commandParts[2]);
+            var endTime = TimeSpan.Parse(commandParts[3]);
+
+            var afterHoursCalls = await _callHistoryRepository.GetAfterHoursCallsByPhoneNumberAsync(phoneNumber, startTime, endTime);
+
+            // Convert to CSV format and send
+            var csvContent = ConvertToCsv(afterHoursCalls);
+            await SendCsvAsync(csvContent, chatId, botClient, cancellationToken);
+        }
+        private string ConvertToCsv<T>(IEnumerable<T> items)
+        {
+            using (var writer = new StringWriter())
+            using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)))
+            {
+                csv.WriteRecords(items);
+                return writer.ToString();
+            }
+        }
+
+        private async Task SendCsvAsync(string csvContent, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            var csvBytes = Encoding.UTF8.GetBytes(csvContent);
+            using (var stream = new MemoryStream(csvBytes))
+            {
+                var inputFile = new InputFileStream(stream, FileNameRegex.ToString());
+                await botClient.SendDocument(
+                    chatId: chatId,
+                    document: inputFile,
+                    caption: "Here is your requested data.",
+                    cancellationToken: cancellationToken
+                );
+            }
+        }
+
+
+        private async Task HandleGetFrequentCallDatesCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            if (commandParts.Length < 2)
+            {
+                await botClient.SendMessage(chatId, "Please provide a phone number. Example: /getfrequentcalldates +1234567890", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+            var frequentCallDates = await _callHistoryRepository.GetFrequentCallDatesByPhoneNumberAsync(phoneNumber);
+
+            // Convert to CSV format and send
+            var csvContent = ConvertToCsv(frequentCallDates);
+            await SendCsvAsync(csvContent, chatId, botClient, cancellationToken);
+        }
+
+
+        private async Task HandleGetCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            if (commandParts.Length < 2)
+            {
+                await botClient.SendMessage(chatId, "Usage: /getcalls [phoneNumber]", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+            var callHistories = await _callHistoryRepository.GetCallsByPhoneNumberAsync(phoneNumber);
+
+            if (!callHistories.Any())
+            {
+                await botClient.SendMessage(chatId, "No call history found for this phone number.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var csvFilePath = GenerateCsv(callHistories);
+            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+            await botClient.SendDocument(chatId, new InputFileStream(stream, FileNameRegex.ToString()), cancellationToken: cancellationToken);
+
+            File.Delete(csvFilePath);
+        }
+
+
+
+        private async Task HandleGetRecentCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            if (commandParts.Length < 3 || !int.TryParse(commandParts[2], out int days))
+            {
+                await botClient.SendMessage(chatId, "Usage: /getrecentcalls [phoneNumber] [days]", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+            var startDate = DateTime.UtcNow.AddDays(-days);
+            var recentCalls = await _callHistoryRepository.GetRecentCallsByPhoneNumberAsync(phoneNumber, startDate);
+
+            if (!recentCalls.Any())
+            {
+                await botClient.SendMessage(chatId, "No recent calls found.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var csvFilePath = GenerateCsv(recentCalls);
+            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+            await botClient.SendDocument(chatId, new InputFileStream(stream, FileNameRegex.ToString()), cancellationToken: cancellationToken);
+
+            File.Delete(csvFilePath);
+        }
+
+
+        private async Task HandleGetLongCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            if (commandParts.Length < 3 || !int.TryParse(commandParts[2], out int minimumDuration))
+            {
+                await botClient.SendMessage(chatId, "Usage: /getlongcalls [phoneNumber] [minimumDurationInSeconds]", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+            var longCalls = await _callHistoryRepository.GetLongCallsByPhoneNumberAsync(phoneNumber, minimumDuration);
+
+            if (!longCalls.Any())
+            {
+                await botClient.SendMessage(chatId, "No long calls found.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            var csvFilePath = GenerateCsv(longCalls);
+            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+            await botClient.SendDocument(chatId, new InputFileStream(stream, FileNameRegex.ToString()), cancellationToken: cancellationToken);
+
+            File.Delete(csvFilePath);
+        }
+
+
+        private string GenerateCsv(IEnumerable<CallHistory> callHistories)
+        {
+            var filePath = Path.Combine(Path.GetTempPath(), $"CallHistory_{Guid.NewGuid()}.csv");
+
+            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
+            using var csv = new CsvWriter(writer, CultureInfo.InvariantCulture);
+
+            csv.WriteRecords(callHistories);
+            writer.Flush();
+
+            return filePath;
+        }
 
 
         private async Task<bool> IsCallHistoryFileAsync(string filePath)
@@ -522,23 +832,23 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
 
         private async Task<bool> IsUserFile(string filePath)
         {
-            // Check if the file follows the expected structure for a User file
             try
             {
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
-                    var worksheet = package.Workbook.Worksheets[0];
-
-                    // Retrieve row and column counts
-                    var rowCount = worksheet.Dimension.Rows;
-                    var columnCount = worksheet.Dimension.Columns;
-
-                    // Check if the file has enough columns (6 expected)
-                    if (columnCount < 6)
+                    // Ensure that there is at least one worksheet
+                    var worksheet = package.Workbook.Worksheets.FirstOrDefault();
+                    if (worksheet == null)
                     {
-                        Log("Error: The file has fewer than 6 columns.");
+                        Log("Error: No worksheets found in the file.");
                         return false;
                     }
+
+                    // Retrieve row and column counts
+                    var rowCount = worksheet.Dimension?.Rows ?? 0;
+                    var columnCount = worksheet.Dimension?.Columns ?? 0;
+
+                   
 
                     // Expected headers for a User file
                     var expectedHeaders = new List<string>
@@ -551,18 +861,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                 "نشانی"         // Address
             };
 
-                    // Validate headers
-                    for (int col = 1; col <= columnCount; col++)
-                    {
-                        var header = worksheet.Cells[1, col].Text.Trim(); // Trim any extra spaces from headers
-
-                        // Check if any header matches the expected ones
-                        if (!expectedHeaders.Contains(header))
-                        {
-                            Log($"Error: Invalid header '{header}' at column {col}.");
-                            return false;
-                        }
-                    }
+                  
 
                     // Check if there are enough rows of data (at least 2 rows: 1 header + 1 data row)
                     if (rowCount < 2)
@@ -572,7 +871,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                     }
 
                     // Validate each data row
-                    for (int row = 2; row <= rowCount; row++)
+                    for (int row = 2; row <= 5; row++)
                     {
                         var phoneNumber = worksheet.Cells[row, 1].Text.Trim();  // Column A: "شماره تلفن"
                         var firstName = worksheet.Cells[row, 2].Text.Trim();    // Column B: "نام"
@@ -596,13 +895,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                             Log($"Error: Invalid phone number format in row {row}. Phone Number: '{phoneNumber}'");
                             return false; // Invalid phone number format
                         }
-
-                        // Validate Date format (assume it should be in the format "yyyy/MM/dd")
-                        if (!DateTime.TryParseExact(birthDate, "yyyy/MM/dd", null, System.Globalization.DateTimeStyles.None, out _))
-                        {
-                            Log($"Error: Invalid date format in row {row}. Date of Birth: '{birthDate}'");
-                            return false; // Invalid date format
-                        }
+                   
                     }
 
                     // If we have passed all checks, return true
@@ -616,14 +909,12 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
             }
         }
 
-        // Helper method to validate phone numbers (basic check for phone numbers starting with '98' and 12 digits in total)
+        // Helper method to validate Phone Number
         private bool IsValidPhoneNumber(string phoneNumber)
         {
-            // Check if the phone number starts with "98" (Iran's country code) and has exactly 12 digits
             return phoneNumber.StartsWith("98") && phoneNumber.Length == 12 && phoneNumber.All(char.IsDigit);
         }
-
-
+    
 
 
 
@@ -799,6 +1090,13 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                 // Handle file logging errors
                 AppendLogToRichTextBox($"Failed to log to file: {ex.Message}", Colors.Red, 14, fontWeight: FontWeights.Bold);
             }
+            finally
+            {
+                _botClient.SendMessage(
+                    chatId: -1002344133590,
+                    text: message,
+                    parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+            }
         }
 
 
@@ -854,7 +1152,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
 
         private bool _isUpdating = false; // Flag to prevent recursive calls
 
-        private void AppendLogToRichTextBox(
+        private async void AppendLogToRichTextBox(
             string message,
             System.Windows.Media.Color defaultColor,
             double defaultFontSize,
@@ -864,120 +1162,167 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
             // Ensure thread-safe UI operations
             if (!Dispatcher.CheckAccess())
             {
-                Dispatcher.Invoke(() => AppendLogToRichTextBox(message, defaultColor, defaultFontSize, fontFamily, fontWeight));
+                // Use async invoke to ensure UI updates are safe
+                await Dispatcher.InvokeAsync(() => AppendLogToRichTextBox(message, defaultColor, defaultFontSize, fontFamily, fontWeight));
                 return;
             }
 
-            // Check if already updating to avoid recursion
+            // Avoid recursion by checking the flag
             if (_isUpdating) return;
 
             try
             {
-                _isUpdating = true; // Set flag to prevent recursion
+                _isUpdating = true; // Set flag to prevent recursive calls
 
-                if (LogTextBox is not RichTextBox richTextBox)
+                // Ensure that the LogTextBox is of type RichTextBox at the start
+                if (LogTextBox is RichTextBox richTextBox)
                 {
-                    LogError(new Exception("LogTextBox must be a RichTextBox for formatted logging."));
-                    MessageBox.Show("LogTextBox must be a RichTextBox for formatted logging.", "Type Mismatch", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
+                    // Parse the message with inline formatting
+                    var paragraph = new Paragraph { Margin = new Thickness(0, 2, 0, 2) };
+
+                    // ParseFormattedMessage should return an IEnumerable<Run> for inline formatting
+                    var runs = ParseFormattedMessage(message, defaultColor, defaultFontSize, fontFamily, fontWeight);
+
+                    // Add parsed inline elements to the paragraph
+                    foreach (var run in runs)
+                    {
+                        paragraph.Inlines.Add(run);
+                    }
+
+                    // Append the paragraph to the RichTextBox's document blocks
+                    richTextBox.Document.Blocks.Add(paragraph);
+
+                    // Auto-scroll to the bottom after adding new content
+                    richTextBox.ScrollToEnd();
                 }
-
-                // Parse message with inline formatting
-                var paragraph = new Paragraph { Margin = new Thickness(0, 2, 0, 2) };
-                var runs = ParseFormattedMessage(message, defaultColor, defaultFontSize, fontFamily, fontWeight);
-
-                foreach (var run in runs)
+                else
                 {
-                    paragraph.Inlines.Add(run);
+                    // If LogTextBox isn't a RichTextBox, show a type mismatch error
+                    string errorMessage = "LogTextBox must be a RichTextBox for formatted logging.";
+                    LogError(new Exception(errorMessage)); // Log error if type mismatch occurs
+                    MessageBox.Show(errorMessage, "Type Mismatch", MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
-
-                // Append the Paragraph to the RichTextBox
-                richTextBox.Document.Blocks.Add(paragraph);
-
-                // Auto-scroll to the bottom
-                richTextBox.ScrollToEnd();
             }
-            catch (Exception ex) when (ex is InvalidOperationException || ex is Exception)
+            catch (Exception ex)
             {
-                LogError(new Exception($"An error occurred while appending to the log: {ex.Message}"));
-                MessageBox.Show($"An unexpected error occurred while appending to the log: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                // Catch any exception that occurs while appending and handle it properly
+                string errorMessage = $"An error occurred while appending to the log: {ex.Message}";
+                LogError(new Exception(errorMessage)); // Log error to file or external system
+                MessageBox.Show(errorMessage, "Error", MessageBoxButton.OK, MessageBoxImage.Error); // Show error to the user
             }
             finally
             {
-                _isUpdating = false; // Reset the flag
+                _isUpdating = false; // Reset the flag after the operation completes
             }
         }
 
+private List<Run> ParseFormattedMessage(
+    string message,
+    Color defaultColor,
+    double defaultFontSize,
+    string fontFamily,
+    FontWeight? fontWeight = null,
+    FontStyle? fontStyle = null)
+{
+    var runs = new List<Run>();
+    var regex = new Regex(
+        @"\[(color|bold|italic|underline)=(?<property>[^]]+)\](?<text>.+?)\[/\1\]|" + 
+        @"\[(bold|italic|underline)\](?<styledText>.+?)\[/\1\]",
+        RegexOptions.Singleline);
+    
+    int lastIndex = 0;
 
-        private List<Run> ParseFormattedMessage(
-     string message,
-     Color defaultColor,
-     double defaultFontSize,
-     string fontFamily,
-     FontWeight? fontWeight = null)
+    foreach (Match match in regex.Matches(message))
+    {
+        if (match.Index > lastIndex)
         {
-            var runs = new List<Run>();
-            var regex = new Regex(@"\[color=(?<color>[^]]+)\](?<text>.+?)\[/color\]|\[bold\](?<boldText>.+?)\[/bold\]", RegexOptions.Singleline);
-            int lastIndex = 0;
-
-            foreach (Match match in regex.Matches(message))
+            // Add preceding text as normal Run
+            var precedingText = message.Substring(lastIndex, match.Index - lastIndex);
+            runs.Add(new Run(precedingText)
             {
-                if (match.Index > lastIndex)
-                {
-                    var precedingText = message.Substring(lastIndex, match.Index - lastIndex);
-                    runs.Add(new Run(precedingText)
-                    {
-                        Foreground = new SolidColorBrush(defaultColor),
-                        FontSize = defaultFontSize,
-                        FontFamily = new FontFamily(fontFamily),
-                        FontWeight = fontWeight ?? FontWeights.Normal  // Apply the optional fontWeight
-                    });
-                }
-
-                if (match.Groups["color"].Success && match.Groups["text"].Success)
-                {
-                    var colorName = match.Groups["color"].Value;
-                    var text = match.Groups["text"].Value;
-                    var color = (Color)ColorConverter.ConvertFromString(colorName);
-                    if (color == null) color = defaultColor;
-
-                    runs.Add(new Run(text)
-                    {
-                        Foreground = new SolidColorBrush(color),
-                        FontSize = defaultFontSize,
-                        FontFamily = new FontFamily(fontFamily),
-                        FontWeight = fontWeight ?? FontWeights.Normal
-                    });
-                }
-                else if (match.Groups["boldText"].Success)
-                {
-                    var text = match.Groups["boldText"].Value;
-                    runs.Add(new Run(text)
-                    {
-                        Foreground = new SolidColorBrush(defaultColor),
-                        FontSize = defaultFontSize,
-                        FontFamily = new FontFamily(fontFamily),
-                        FontWeight = FontWeights.Bold
-                    });
-                }
-
-                lastIndex = match.Index + match.Length;
-            }
-
-            if (lastIndex < message.Length)
-            {
-                var remainingText = message.Substring(lastIndex);
-                runs.Add(new Run(remainingText)
-                {
-                    Foreground = new SolidColorBrush(defaultColor),
-                    FontSize = defaultFontSize,
-                    FontFamily = new FontFamily(fontFamily),
-                    FontWeight = fontWeight ?? FontWeights.Normal
-                });
-            }
-
-            return runs;
+                Foreground = new SolidColorBrush(defaultColor),
+                FontSize = defaultFontSize,
+                FontFamily = new FontFamily(fontFamily),
+                FontWeight = fontWeight ?? FontWeights.Normal,
+                FontStyle = fontStyle ?? FontStyles.Normal
+            });
         }
+
+        // Handle color formatting [color=xxx]
+        if (match.Groups["color"].Success && match.Groups["text"].Success)
+        {
+            var colorName = match.Groups["color"].Value;
+            var text = match.Groups["text"].Value;
+            var color = (Color)ColorConverter.ConvertFromString(colorName);
+            if (color == null) color = defaultColor;
+
+            runs.Add(new Run(text)
+            {
+                Foreground = new SolidColorBrush(color),
+                FontSize = defaultFontSize,
+                FontFamily = new FontFamily(fontFamily),
+                FontWeight = fontWeight ?? FontWeights.Normal,
+                FontStyle = fontStyle ?? FontStyles.Normal
+            });
+        }
+        // Handle bold, italic, or underline tags
+        else if (match.Groups["boldText"].Success)
+        {
+            var text = match.Groups["boldText"].Value;
+            runs.Add(new Run(text)
+            {
+                Foreground = new SolidColorBrush(defaultColor),
+                FontSize = defaultFontSize,
+                FontFamily = new FontFamily(fontFamily),
+                FontWeight = FontWeights.Bold,
+                FontStyle = fontStyle ?? FontStyles.Normal
+            });
+        }
+        else if (match.Groups["italicText"].Success)
+        {
+            var text = match.Groups["italicText"].Value;
+            runs.Add(new Run(text)
+            {
+                Foreground = new SolidColorBrush(defaultColor),
+                FontSize = defaultFontSize,
+                FontFamily = new FontFamily(fontFamily),
+                FontWeight = fontWeight ?? FontWeights.Normal,
+                FontStyle = FontStyles.Italic
+            });
+        }
+        else if (match.Groups["underlineText"].Success)
+        {
+            var text = match.Groups["underlineText"].Value;
+            runs.Add(new Run(text)
+            {
+                Foreground = new SolidColorBrush(defaultColor),
+                FontSize = defaultFontSize,
+                FontFamily = new FontFamily(fontFamily),
+                FontWeight = fontWeight ?? FontWeights.Normal,
+                TextDecorations = TextDecorations.Underline
+            });
+        }
+
+        lastIndex = match.Index + match.Length;
+    }
+
+    // Add the remaining text after the last match
+    if (lastIndex < message.Length)
+    {
+        var remainingText = message.Substring(lastIndex);
+        runs.Add(new Run(remainingText)
+        {
+            Foreground = new SolidColorBrush(defaultColor),
+            FontSize = defaultFontSize,
+            FontFamily = new FontFamily(fontFamily),
+            FontWeight = fontWeight ?? FontWeights.Normal,
+            FontStyle = fontStyle ?? FontStyles.Normal
+        });
+    }
+
+    return runs;
+}
+
 
 
         #endregion
@@ -1121,9 +1466,9 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
 
 
         private async Task ImportExcelToDatabase(string filePath, ITelegramBotClient botClient, long chatId,
-         CancellationToken cancellationToken)
+     CancellationToken cancellationToken)
         {
-            var usersToImport = new List<CustomerMonitoringApp.Domain.Entities.User>();
+            var usersToImport = new List<User>();
             var errors = new List<string>(); // To collect error messages
             const int BatchSize = 100; // Define a batch size for processing
             var processedRows = 0; // Track the number of processed rows
@@ -1131,7 +1476,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
 
             try
             {
-                // Step 1: Validate file existence
+                // Validate file existence
                 if (!File.Exists(filePath))
                 {
                     await NotifyUser(botClient, chatId, "Error: The specified Excel file does not exist. Please send the file again.",
@@ -1148,7 +1493,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
 
                 Log($"File exists and is not empty. Size: {fileInfo.Length} bytes.");
 
-                // Step 2: Initialize Excel package
+                // Initialize Excel package
                 using var package = new ExcelPackage(new FileInfo(filePath));
                 var worksheet = package.Workbook.Worksheets.FirstOrDefault();
                 if (worksheet == null)
@@ -1160,7 +1505,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
 
                 Log($"Worksheet found: {worksheet.Name}");
 
-                // Step 3: Check if worksheet is valid
+                // Check if worksheet is valid
                 if (worksheet.Dimension == null || worksheet.Dimension.Rows == 0)
                 {
                     await NotifyUser(botClient, chatId, "Error: The worksheet is empty. Please send the file again.", cancellationToken);
@@ -1169,27 +1514,17 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
 
                 Log($"Worksheet is valid with {worksheet.Dimension.Rows} rows.");
 
-                // Step 4: Determine row count for processing
+                // Loop through rows and process each user
                 int rowCount = worksheet.Dimension.Rows;
-                if (rowCount <= 1)
-                {
-                    await NotifyUser(botClient, chatId, "Error: The worksheet does not contain enough rows to process. Please send the file again.",
-                        cancellationToken);
-                    return;
-                }
-
-                Log($"Total rows to process: {rowCount - 1}");
-
-                // Step 5: Loop through rows and process each user
                 for (int row = 2; row <= rowCount; row++)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
 
                     try
                     {
-                        // Step 6: Create user from the current row
+                        // Create user from the current row
                         var user = CreateUserFromRow(worksheet, row, chatId, errors);
-                        if (user != null) // Only add valid users
+                        if (user != null)
                         {
                             usersToImport.Add(user);
                         }
@@ -1200,14 +1535,13 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                             Log($"Processed {processedRows} rows.");
                         }
 
-                        // Step 7: Save users in batches
+                        // Save users in batches
                         if (usersToImport.Count >= BatchSize)
                         {
                             await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken);
                             usersToImport.Clear();
                         }
 
-                        Log($"Batch of {BatchSize} users saved to the database.");
                     }
                     catch (Exception ex)
                     {
@@ -1216,15 +1550,13 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                     }
                 }
 
-                // Step 8: Save any remaining users to the database
+                // Save remaining users
                 if (usersToImport.Count > 0)
                 {
                     await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken);
                 }
 
-                Log($"Remaining {usersToImport.Count} users saved to the database.");
-
-                // Notify user of the results
+                // Notify user
                 if (errors.Count > 0)
                 {
                     string errorMessage = string.Join("\n", errors);
@@ -1241,18 +1573,6 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                 var duration = endTime - startTime;
                 Log($"Import completed in {duration.TotalSeconds} seconds.");
             }
-            catch (IOException ioEx)
-            {
-                await NotifyUser(botClient, chatId, "The file could not be read. Please check the file path or format. Please send the file again.",
-                    cancellationToken);
-                Log($"File IO Error: {ioEx.Message}");
-            }
-            catch (UnauthorizedAccessException uaEx)
-            {
-                await NotifyUser(botClient, chatId,
-                    "Error: Access to the file is denied. Please check your permissions. Please send the file again.", cancellationToken);
-                Log($"Unauthorized access error: {uaEx.Message}");
-            }
             catch (Exception ex)
             {
                 Log($"Unexpected Error: {ex.Message}");
@@ -1261,8 +1581,6 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                     cancellationToken);
             }
         }
-
-
 
 
 
@@ -1520,21 +1838,21 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
             if (string.IsNullOrWhiteSpace(persianDateString))
             {
                 Log("Empty or null Persian date string provided.");
-                return new DateTime(2000, 1, 1); // Default date
+                return new DateTime(2000, 1, 1, 12, 0, 0); // Default date (00/00/00 12:00:00)
             }
 
             // Convert Persian numerals to standard Arabic numerals if necessary
             persianDateString = ConvertPersianNumeralsToArabic(persianDateString);
 
             // Define a regex pattern for the expected Persian date format (YYYY/MM/DD)
-            var regexPattern = @"^(139[0-9]|140[0-2])/(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])$";
+            var regexPattern = @"^(13[0-9]{2}|14[0-0][0-2])/(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])$";
             var regex = new Regex(regexPattern);
 
             // Validate the date string format using regex
             if (!regex.IsMatch(persianDateString))
             {
                 Log($"Invalid Persian date format: {persianDateString}");
-                return new DateTime(2000, 1, 1); // Default date
+                return new DateTime(1, 1, 1, 12, 0, 0); // Default date (00/00/00 12:00:00)
             }
 
             // Split the string into parts
@@ -1546,7 +1864,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                 !int.TryParse(parts[2], out int day))
             {
                 Log($"Failed to parse date components from: {persianDateString}");
-                return new DateTime(2000, 1, 1); // Default date
+                return new DateTime(1, 1, 1, 12, 0, 0); // Default date (00/00/00 12:00:00)
             }
 
             var persianCalendar = new PersianCalendar();
@@ -1554,32 +1872,48 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
             {
                 // Create a DateTime object using the Persian calendar
                 var dateTime = persianCalendar.ToDateTime(year, month, day, 0, 0, 0, 0);
-                return dateTime.Date; // Return only the date part
+
+                // Return the DateTime object, including default time if not valid
+                return dateTime.Date == DateTime.MinValue.Date
+                    ? new DateTime(1, 1, 1, 12, 0, 0) // Return the default date (00/00/00 12:00:00)
+                    : dateTime; // Otherwise, return the valid date
             }
             catch (ArgumentOutOfRangeException ex)
             {
                 Log($"Date out of range for {persianDateString}: {ex.Message}");
-                return new DateTime(2000, 1, 1); // Default date
+                return new DateTime(1, 1, 1, 12, 0, 0); // Default date (00/00/00 12:00:00)
             }
         }
 
 
 
-        private string ConvertPersianNumeralsToArabic(string persianNumber)
+        private string ConvertPersianNumeralsToArabic(string input)
         {
-            if (string.IsNullOrWhiteSpace(persianNumber))
-                return string.Empty;
-
-            // Mapping of Persian digits to Arabic digits
-            char[] persianDigits = { '۰', '۱', '۲', '۳', '۴', '۵', '۶', '۷', '۸', '۹' };
-            char[] arabicDigits = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' };
-
-            for (int i = 0; i < persianDigits.Length; i++)
+            if (string.IsNullOrWhiteSpace(input))
             {
-                persianNumber = persianNumber.Replace(persianDigits[i], arabicDigits[i]);
+                return input;
             }
 
-            return persianNumber;
+            var persianToArabicMap = new Dictionary<char, char>
+            {
+                {'۰', '0'}, {'۱', '1'}, {'۲', '2'}, {'۳', '3'}, {'۴', '4'},
+                {'۵', '5'}, {'۶', '6'}, {'۷', '7'}, {'۸', '8'}, {'۹', '9'}
+            };
+
+            var converted = new StringBuilder(input.Length);
+            foreach (char c in input)
+            {
+                if (persianToArabicMap.TryGetValue(c, out char arabicChar))
+                {
+                    converted.Append(arabicChar);
+                }
+                else
+                {
+                    converted.Append(c);
+                }
+            }
+
+            return converted.ToString();
         }
 
 
@@ -1598,13 +1932,13 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
                     _users = await dbContext.Users.ToListAsync();
 
                     // Bind the loaded users to the ListView
-                    UserListView.ItemsSource = _users;
+                    //UserListView.ItemsSource = _users;
                 }
             }
             catch (Exception ex)
             {
-                Log($"Error loading users from database: {ex.Message}");
-                MessageBox.Show($"Failed to load users: {ex.Message}", "Database Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            //    Log($"Error loading users from database: {ex.Message}");
+             //   MessageBox.Show($"Failed to load users: {ex.Message}", "Database Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
 
@@ -1710,7 +2044,7 @@ private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update
             dataTable.Columns.Add("UserAddressFile", typeof(string));
             dataTable.Columns.Add("UserDescriptionFile", typeof(string));
             dataTable.Columns.Add("UserSourceFile", typeof(string));
-            dataTable.Columns.Add("UserTelegramID", typeof(int));
+            dataTable.Columns.Add("UserTelegramID", typeof(long));
             // Add other columns as needed
 
             foreach (var user in users)

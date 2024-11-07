@@ -1,7 +1,7 @@
 ﻿<Window x:Class="CustomerMonitoringApp.WPFApp.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Customer Monitoring App" Height="800" Width="1200"
+        Title="Customer Monitoring App" Height="1057" Width="1200"
         Background="#f4f6f9" FontFamily="Segoe UI" FontSize="14" Foreground="Black"
         ResizeMode="CanResize">
 
@@ -12,10 +12,13 @@
             <Setter Property="Background" Value="#6200EE"/>
             <Setter Property="Foreground" Value="White"/>
             <Setter Property="BorderBrush" Value="#6200EE"/>
+
             <Style.Triggers>
+
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Background" Value="#5A00D1"/>
                     <Setter Property="Cursor" Value="Hand"/>
+
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -89,12 +92,46 @@
 
         <!-- Logs Section -->
         <Border Background="{StaticResource BorderBackground}" CornerRadius="8" Padding="15" Margin="0,0,0,20" VerticalAlignment="Stretch">
-            <GroupBox Header="Logs" FontSize="16" Foreground="#6200EE">
-                <ScrollViewer VerticalScrollBarVisibility="Auto" Height="200">
-                    <RichTextBox x:Name="LogTextBox" Background="White" Foreground="Black" 
-                                 FontSize="14" IsReadOnly="True"
-                                 BorderThickness="0" Padding="10" VerticalScrollBarVisibility="Visible"/>
-                </ScrollViewer>
+            <GroupBox Header="Logs" FontSize="16" Foreground="#6200EE" BorderBrush="#6200EE" BorderThickness="1" Padding="10">
+                <StackPanel>
+                    <!-- Clear Log Button -->
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,5">
+                        <Button Content="Clear Logs" Width="100" Height="30" FontSize="12" Foreground="White" 
+                        Background="#6200EE" BorderBrush="#6200EE" 
+                       ToolTip="Clear the logs">
+                            <Button.Style>
+                                <Style TargetType="Button">
+                                    <Setter Property="Background" Value="#6200EE"/>
+                                    <Setter Property="Foreground" Value="White"/>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter Property="Background" Value="#5A00D1"/>
+                                            <Setter Property="Cursor" Value="Hand"/>
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </StackPanel>
+
+                    <!-- ScrollViewer to display log content -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Height="200">
+                        <RichTextBox x:Name="LogTextBox" Background="White" Foreground="Black" FontSize="14" IsReadOnly="True"
+                             BorderThickness="0" Padding="10" VerticalScrollBarVisibility="Visible" 
+                             AcceptsReturn="True" FontFamily="Bookman Old Style"/>
+                    </ScrollViewer>
+
+                    <!-- Log Level Control -->
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" Margin="10,10,0,0">
+                        <TextBlock Text="Log Level: " VerticalAlignment="Center" FontSize="14" Foreground="#333"/>
+                        <ComboBox x:Name="LogLevelComboBox" Width="120" Height="30" Margin="10,0,0,0" FontSize="12"
+                          SelectedIndex="0" VerticalAlignment="Center">
+                            <ComboBoxItem Content="INFO" />
+                            <ComboBoxItem Content="WARNING" />
+                            <ComboBoxItem Content="ERROR" />
+                        </ComboBox>
+                    </StackPanel>
+                </StackPanel>
             </GroupBox>
         </Border>
 
