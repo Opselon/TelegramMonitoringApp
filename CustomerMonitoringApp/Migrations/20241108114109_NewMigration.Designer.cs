@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace CustomerMonitoringApp.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20241107153251_InitialCreate")]
-    partial class InitialCreate
+    [Migration("20241108114109_NewMigration")]
+    partial class NewMigration
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -33,8 +33,9 @@ namespace CustomerMonitoringApp.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("CallId"));
 
-                    b.Property<DateTime>("CallDateTime")
-                        .HasColumnType("datetime");
+                    b.Property<string>("CallDateTime")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("CallType")
                         .IsRequired()

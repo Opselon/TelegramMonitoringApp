@@ -22,7 +22,7 @@ namespace CustomerMonitoringApp
             var serviceCollection = new ServiceCollection();
             ConfigureServices(serviceCollection);
 
-            Services = serviceCollection.BuildServiceProvider();
+           Services = serviceCollection.BuildServiceProvider();
 
             // Manually resolve the MainWindow from the DI container and show it
             //var mainWindow = Services.GetRequiredService<MainWindow>();
@@ -43,7 +43,7 @@ namespace CustomerMonitoringApp
 
             // Add logging services
             services.AddLogging(configure => configure.AddConsole());
-
+            services.AddScoped<IServiceProvider, ServiceProvider>();
             // Register AppDbContext with a connection string
             services.AddDbContext<AppDbContext>(options =>
                 options.UseSqlServer("Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True"));
@@ -51,7 +51,6 @@ namespace CustomerMonitoringApp
             // Register other required services
             services.AddSingleton<ILogger<MainWindow>, Logger<MainWindow>>();
             services.AddScoped<ICallHistoryRepository, CallHistoryRepository>();
-            services.AddScoped<IServiceProvider, ServiceProvider>();
             services.AddTransient<ICallHistoryImportService, CallHistoryImportService>();
 
             // Register MainWindow for Dependency Injection

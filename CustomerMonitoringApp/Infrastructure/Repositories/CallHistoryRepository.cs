@@ -6,12 +6,15 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using CustomerMonitoringApp.Infrastructure.Data;
+using Microsoft.Extensions.Logging;
+using System.Globalization;
 
 namespace CustomerMonitoringApp.Infrastructure.Repositories
 {
     public class CallHistoryRepository : ICallHistoryRepository
     {
         private readonly AppDbContext _context;
+        private readonly ILogger<CallHistoryRepository> _logger;
 
         public CallHistoryRepository(AppDbContext context)
         {
@@ -31,26 +34,84 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
 
         #region New Methods for Searching by Phone Number
 
+        public async Task<List<CallHistory>> GetRecentCallsByPhoneNumberAsync(string phoneNumber, string startDate, string endDateTime)
+        {
+            try
+            {
+                // Parse Persian dates to Gregorian DateTime
+                DateTime parsedStartDate = ParsePersianDate(startDate);
+                DateTime parsedEndDateTime = ParsePersianDate(endDateTime);
+
+                var callHistories = await _context.CallHistories
+                    .Where(ch => ch.SourcePhoneNumber == phoneNumber || ch.DestinationPhoneNumber == phoneNumber)
+                    .ToListAsync();
+
+                // فیلتر کردن تاریخ‌ها در کد
+                var filteredCallHistories = callHistories
+                    .Where(ch => DateTime.Parse(ch.CallDateTime) >= parsedStartDate && DateTime.Parse(ch.CallDateTime) <= parsedEndDateTime)
+                    .ToList();
+
+                return filteredCallHistories;
+            }
+            catch (FormatException ex)
+            {
+                // Log or handle the exception if date parsing fails
+                throw new InvalidOperationException("Invalid date format.", ex);
+            }
+        }
+
+        // Helper method to parse Persian date strings to DateTime
+        private DateTime ParsePersianDate(string persianDate)
+        {
+            var persianCalendar = new PersianCalendar();
+            var dateParts = persianDate.Split('/');
+            int year = int.Parse(dateParts[0]);
+            int month = int.Parse(dateParts[1]);
+            int day = int.Parse(dateParts[2]);
+            return persianCalendar.ToDateTime(year, month, day, 0, 0, 0, 0);
+        }
+
+        // Helper method to convert DateTime to Persian date string
+        private string ConvertToPersianDate(DateTime date)
+        {
+            var persianCalendar = new PersianCalendar();
+            int year = persianCalendar.GetYear(date);
+            int month = persianCalendar.GetMonth(date);
+            int day = persianCalendar.GetDayOfMonth(date);
+            return $"{year}/{month:D2}/{day:D2}";
+        }
+
         /// <summary>
-        /// Retrieves all call histories for a specific phone number.
+        /// Retrieves selected call history fields for a specific phone number, excluding sensitive data by returning a DTO.
         /// </summary>
         public async Task<List<CallHistory>> GetCallsByPhoneNumberAsync(string phoneNumber)
         {
-            return await _context.CallHistories
-                .Where(ch => ch.SourcePhoneNumber == phoneNumber || ch.DestinationPhoneNumber == phoneNumber)
-                .ToListAsync();
+            var result = new List<CallHistory>();
+
+            try
+            {
+                result = await _context.CallHistories
+                    .Where(ch => ch.SourcePhoneNumber == phoneNumber || ch.DestinationPhoneNumber == phoneNumber)
+                    .Select(ch => new CallHistory // Map only specific properties
+                    {
+                        SourcePhoneNumber = ch.SourcePhoneNumber,
+                        DestinationPhoneNumber = ch.DestinationPhoneNumber,
+                        CallDateTime = ch.CallDateTime,
+                        Duration = ch.Duration,
+                        CallType = ch.CallType
+                    })
+                    .ToListAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error occurred while fetching call history for phone number: {PhoneNumber}", phoneNumber);
+            }
+
+            return result;
         }
 
-        /// <summary>
-        /// Retrieves recent call histories for a specific phone number based on a start date.
-        /// </summary>
-        public async Task<List<CallHistory>> GetRecentCallsByPhoneNumberAsync(string phoneNumber, DateTime startDate)
-        {
-            return await _context.CallHistories
-                .Where(ch => ch.SourcePhoneNumber == phoneNumber && ch.CallDateTime >= startDate)
-                .ToListAsync();
-        }
 
+   
         /// <summary>
         /// Retrieves long calls for a specific phone number that exceed a specified duration.
         /// </summary>
@@ -74,8 +135,14 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
         {
             return await _context.CallHistories
                 .Where(ch => ch.SourcePhoneNumber == phoneNumber)
-                .GroupBy(ch => ch.CallDateTime.Date)
+                .Select(ch => new
+                {
+                    CallDate = DateTime.Parse(ch.CallDateTime), // Convert string to DateTime
+                    ch
+                })
+                .GroupBy(ch => ch.CallDate.Date) // Now you can use .Date on DateTime
                 .ToDictionaryAsync(g => g.Key, g => g.Count());
+
         }
 
         /// <summary>
@@ -97,7 +164,7 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
         {
             var recentCallThreshold = DateTime.Now - timeSpan;
             return await _context.CallHistories
-                .AnyAsync(ch => ch.SourcePhoneNumber == phoneNumber && ch.CallDateTime >= recentCallThreshold);
+                .AnyAsync(ch => ch.SourcePhoneNumber == phoneNumber);
         }
 
         #endregion

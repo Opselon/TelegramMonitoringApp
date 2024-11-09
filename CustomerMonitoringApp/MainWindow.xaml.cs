@@ -37,11 +37,13 @@ using System.Text;
 using CsvHelper;
 using CsvHelper.Configuration;
 using User = CustomerMonitoringApp.Domain.Entities.User;
+using CsvHelper.TypeConversion;
 namespace CustomerMonitoringApp.WPFApp
 {
 
     public partial class MainWindow : Window
     {
+
         public MainWindow() : this(
 
             App.Services.GetRequiredService<ILogger<MainWindow>>(),
@@ -50,6 +52,7 @@ namespace CustomerMonitoringApp.WPFApp
             App.Services.GetRequiredService<NotificationService>(),
             App.Services.GetRequiredService<ICallHistoryImportService>())
         {
+            timestamp = GetPersianDate() + ".csv";
             LoadUsersFromDatabaseAsync();
             InitializeBotClient();
             InitializeComponent();
@@ -58,13 +61,14 @@ namespace CustomerMonitoringApp.WPFApp
 
         #region Fields and Properties
         private static readonly Regex FileNameRegex = new Regex(@"^(Getcalls|Getrecentcalls|Getlongcalls)_\d{10,}_\d{8}_\d{6}\.csv$", RegexOptions.Compiled);
-
+        private string timestamp;
         private readonly ILogger<MainWindow> _logger;
         private CancellationTokenSource _cancellationTokenSource;
         private ITelegramBotClient _botClient;
         private readonly NotificationService _notificationService;
         private readonly string
             _token = "6768055952:AAGSETUCUC76eXuSoAGX6xcsQk1rrt0K4Ng"; // Replace with your actual bot token
+        private readonly ConcurrentDictionary<long, UserState> _userStates;
         private readonly ICallHistoryImportService _callHistoryImportService;
         private readonly IServiceProvider _serviceProvider;
         private readonly ICallHistoryRepository _callHistoryRepository;
@@ -80,14 +84,38 @@ namespace CustomerMonitoringApp.WPFApp
             NotificationService notificationService,
             ICallHistoryImportService callHistoryImportService)
         {
+
+            _lastMessageTimes = new ConcurrentDictionary<long, DateTime>();
+            _messageTimestamps = new ConcurrentDictionary<long, Queue<DateTime>>();
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _callHistoryRepository = callHistoryRepository ?? throw new ArgumentNullException(nameof(callHistoryRepository));
             _serviceProvider = serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
             _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
             _callHistoryImportService = callHistoryImportService ?? throw new ArgumentNullException(nameof(callHistoryImportService));
-
+            _userStates = new ConcurrentDictionary<long, UserState>();
         }
-     
+
+        private string GetPersianDate()
+        {
+            PersianCalendar persianCalendar = new PersianCalendar();
+
+            // تاریخ امروز به شمسی
+            int year = persianCalendar.GetYear(DateTime.Now);
+            int month = persianCalendar.GetMonth(DateTime.Now);
+            int day = persianCalendar.GetDayOfMonth(DateTime.Now);
+            int hour = DateTime.Now.Hour;
+            int minute = DateTime.Now.Minute;
+            int second = DateTime.Now.Second;
+
+            // فرمت تاریخ شمسی: yyyyMMdd_HHmmss
+            return $"{year:D4}{month:D2}{day:D2}_{hour:D2}{minute:D2}{second:D2}";
+        }
+        // User state class to track per-user progress
+        private class UserState
+        {
+            public bool IsBusy { get; set; } = false; // To prevent multiple simultaneous requests
+        }
+
         /// <summary>
         /// Initializes the bot client and verifies if the token is valid.
         /// </summary>
@@ -248,17 +276,92 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
 
+
+        private readonly ConcurrentDictionary<long, DateTime> _lastMessageTimes;
+        private readonly ConcurrentDictionary<long, Queue<DateTime>> _messageTimestamps;
+
+        private const int MinMessageIntervalInSeconds = 5; // Minimum time interval between two messages (in seconds)
+        private const int MaxMessagesPerInterval = 30; // Maximum number of messages allowed per user in a given interval (e.g., 5 messages per 60 seconds)
+        private const int MessageWindowInSeconds = 60; // Time window to count the messages (e.g., 60 seconds)
+
+        // Checks if a message has been processed by its MessageId
+        private void TrackMessageTimestamp(long chatId)
+        {
+            var now = DateTime.UtcNow;
+            if (!_messageTimestamps.ContainsKey(chatId))
+            {
+                _messageTimestamps[chatId] = new Queue<DateTime>();
+            }
+            var messageQueue = _messageTimestamps[chatId];
+            messageQueue.Enqueue(now);
+        }
+        private bool HasMessageBeenProcessed(long chatId, int messageId)
+        {
+            // You can implement logic here to track processed messages by chatId and messageId.
+            return false; // Simplified for this example, assuming no message is processed more than once.
+        }
+        // Checks if the user is spamming based on the number of messages sent in the given time window
+
+        private bool IsSpamming(long chatId)
+        {
+            var now = DateTime.UtcNow;
+            if (!_messageTimestamps.ContainsKey(chatId))
+            {
+                _messageTimestamps[chatId] = new Queue<DateTime>();
+            }
+
+            var messageQueue = _messageTimestamps[chatId];
+
+            // Remove old timestamps that are outside the window
+            while (messageQueue.Any() && (now - messageQueue.Peek()).TotalSeconds > MessageWindowInSeconds)
+            {
+                messageQueue.Dequeue();
+            }
+
+            // Check if the user exceeded the max messages allowed in the time window
+            if (messageQueue.Count >= MaxMessagesPerInterval)
+            {
+                return true; // User is spamming
+            }
+
+            return false;
+        }
+
+
         private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update,
             CancellationToken cancellationToken)
         {
             var chatId = update.Message?.Chat?.Id;
-            var startTime = DateTime.UtcNow; // Start time for processing metrics
+            var messageId = update.Message?.MessageId;
+       
 
-            if (chatId == null)
+            if (chatId == null || messageId == null)
             {
-                Log("Error: chatId is null.");
+                Log("Error: Invalid chatId or messageId.");
                 return;
             }
+
+            // Anti-Spam: Check if the user is spamming by checking the message frequency
+            if (IsSpamming(chatId.Value))
+            {
+                Log($"Spam detected from ChatId {chatId}. Skipping message.");
+                return; // Skip processing if the user is spamming
+            }
+
+            // Add timestamp for the message to prevent spam
+            TrackMessageTimestamp(chatId.Value);
+
+            // Skip processing if this message has already been processed
+            if (HasMessageBeenProcessed(chatId.Value, messageId.Value))
+            {
+                Log($"Message with ID {messageId} from ChatId {chatId} already processed. Skipping.");
+                return;
+            }
+ 
+
+            // Initialize or fetch user state
+            var userState = _userStates.GetOrAdd(chatId.Value, new UserState());
+
             // Handle Text Commands for Call History CSV Generation
             if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Text)
             {
@@ -271,48 +374,56 @@ namespace CustomerMonitoringApp.WPFApp
                     switch (command)
                     {
                         case "/getcalls":
-                            await HandleGetCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            await HandleGetCallsCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
                         case "/getrecentcalls":
-                            await HandleGetRecentCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            await HandleGetRecentCallsCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
                         case "/getlongcalls":
-                            await HandleGetLongCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            await HandleGetLongCallsCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
                         case "/getafterhourscalls":
-                            await HandleGetAfterHoursCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            await HandleGetAfterHoursCallsCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
                         case "/getfrequentcalldates":
-                            await HandleGetFrequentCallDatesCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            await HandleGetFrequentCallDatesCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
                         case "/gettoprecentcalls":
-                            await HandleGetTopRecentCallsCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            await HandleGetTopRecentCallsCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
                         case "/hasrecentcall":
-                            await HandleHasRecentCallCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                            await HandleHasRecentCallCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
                         default:
                             await botClient.SendMessage(
                                 chatId: chatId.Value,
-                                text: "🤔 *Unknown Command*\n\nIt looks like you've entered a command I don't recognize. Please try one of the following supported commands:\n\n" +
-                                      "📞 /getcalls - _Retrieve a full history of calls_\n" +
-                                      "📅 /getrecentcalls - _Get recent call records_\n" +
-                                      "⏳ /getlongcalls - _Find calls longer than a specified duration_\n" +
-                                      "🔝 /gettoprecentcalls - _View the top N most recent calls_\n" +
-                                      "🕒 /hasrecentcall - _Check if a number was contacted within a time span_\n\n" +
-                                      "If you need more help, use `/help` for a full list of commands and details on their usage. 😊",
-                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                                text: "🤔 *Unknown Command*\n\n" +
+                                      "Oops! It looks like you've entered a command that I don’t recognize and can’t process right now. But no worries—I’m here to help! Please try one of the following supported commands:\n\n" +
+                                      "📞 /getcalls - _Retrieve a complete history of all calls, including dates, durations, and participants._\n\n" +
+                                      "📅 /getrecentcalls - _Get a quick overview of the most recent calls made or received, with details like call times and participants._\n\n" +
+                                      "⏳ /getlongcalls - _Find and list calls that lasted longer than a specific duration, making it easy to identify longer conversations._\n\n" +
+                                      "🔝 /gettoprecentcalls - _See the top N most recent calls, so you can quickly access the latest records._\n\n" +
+                                      "🕒 /hasrecentcall - _Check if a specific phone number has had any calls within a certain time frame to track recent interactions._\n\n" +
+                                      "If you need help with any commands or want a full list, just use `/help` for detailed instructions. 😊\n\n" +
+                                      "I’m here to make things as easy as possible for you, so feel free to reach out anytime!",
+                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, replyParameters: messageId.Value,
                                 cancellationToken: cancellationToken
                             );
                             break;
                     }
                 }
+
                 catch (Exception ex)
                 {
                     Log($"Error handling command '{command}' for user {chatId}: {ex.Message}");
-                    await botClient.SendMessage(
+                    await botClient.SendTextMessageAsync(
                         chatId: chatId.Value,
-                        text: $"❌ Error processing command: {ex.Message}",
+                        text: "❌ *Error processing command*\n\n" +
+                              "Oops, something went wrong while trying to process your command. Here's the error message I encountered:\n\n" +
+                              $"⚠️ _{ex.Message}_\n\n" +
+                              "Don't worry, though! I’m here to help you. You can try again, or if you're still having trouble, feel free to send a more detailed request, and I’ll assist you further.\n\n" +
+                              "If this issue persists, please try using `/help` to review the available commands and their correct formats. I'm always available to guide you through any issues or questions you have. 😊",
+                        replyParameters: messageId.Value,  // This ensures your message is a reply to the user's message
                         cancellationToken: cancellationToken
                     );
                 }
@@ -328,12 +439,17 @@ namespace CustomerMonitoringApp.WPFApp
                     if (document != null && Path.GetExtension(document.FileName)
                             .Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
                     {
-                        // Inform the user that the file is being processed
                         await botClient.SendMessage(
                             chatId: chatId.Value,
-                            text: "📥 Received your .xlsx file! Processing...",
+                            text: "📥 *I’ve received your .xlsx file!* \n\n" +
+                                  "I’m getting to work on processing it right now! 🚀 This may take a little time, depending on the file size and content, but don't worry—I’ll keep you updated.\n\n" +
+                                  "In the meantime, feel free to relax or ask me anything else! I’ll notify you as soon as the processing is done and you’re ready to proceed. ⏳💼\n\n" +
+                                  "Thank you for your patience! Your file is in good hands. 😊",
+                            replyParameters: messageId.Value,
+                            parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
                             cancellationToken: cancellationToken
                         );
+                        ;
                         Log($"Received .xlsx file from user {chatId}: {document.FileName}");
 
                         // Step 1: Download the file
@@ -344,7 +460,7 @@ namespace CustomerMonitoringApp.WPFApp
                             Log($"File downloaded successfully: {filePath}");
                             await botClient.SendMessage(
                                 chatId: chatId.Value,
-                                text: "🧲 File downloaded successfully",
+                                text: "🧲 File downloaded successfully", replyParameters: messageId.Value,
                                 cancellationToken: cancellationToken
                             );
                         }
@@ -352,7 +468,7 @@ namespace CustomerMonitoringApp.WPFApp
                         {
                             Log($"Error downloading file from user {chatId}: {downloadEx.Message}");
                             await botClient.SendMessage(
-                                chatId: chatId.Value,
+                                chatId: chatId.Value, replyParameters: messageId.Value,
                                 text: "❌ Error downloading the file. Please try again.",
                                 cancellationToken: cancellationToken
                             );
@@ -382,20 +498,21 @@ namespace CustomerMonitoringApp.WPFApp
 
 
                                 // Try processing the CallHistory file
-                                await _callHistoryImportService.ProcessExcelFileAsync(filePath);
-                                Log($"Successfully processed CallHistory data: {filePath}");
+                                await _callHistoryImportService.ProcessExcelFileAsync(filePath,cancellationToken);
+                                Log($"Successfully processed CallHistory data: {filePath} for user ID:{chatId}");
 
                                 await botClient.SendMessage(
-                                    chatId: chatId.Value,
-                                    text: "✅ File processed and data imported successfully!",
-                                    cancellationToken: cancellationToken
-                                );
+                                    chatId: chatId.Value, replyParameters: messageId.Value,
+                                    text: "✅ *Database operations complete, and users added successfully!* \n\n", 
+                                    cancellationToken: cancellationToken,
+                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown );
+
                             }
                             catch (ArgumentException argEx)
                             {
                                 Log($"Invalid argument error: {argEx.Message}");
                                 await botClient.SendMessage(
-                                    chatId: chatId.Value,
+                                    chatId: chatId.Value, replyParameters: messageId.Value,
                                     text: $"❌ Invalid file or input. Error: {argEx.Message}",
                                     cancellationToken: cancellationToken
                                 );
@@ -404,7 +521,7 @@ namespace CustomerMonitoringApp.WPFApp
                             {
                                 Log($"General error processing CallHistory data: {ex.Message}");
                                 await botClient.SendMessage(
-                                    chatId: chatId.Value,
+                                    chatId: chatId.Value, replyParameters: messageId.Value,
                                     text: $"❌ Internal error during data import. Error: {ex.Message}",
                                     cancellationToken: cancellationToken
                                 );
@@ -416,14 +533,14 @@ namespace CustomerMonitoringApp.WPFApp
                             // Process Users Update data
                             try
                             {
-                                await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
+                               // await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
                                 Log($"File processed and users data saved: {filePath}");
                             }
                             catch (Exception ex)
                             {
                                 Log($"Error processing Users data for user {chatId}: {ex.Message}");
                                 await botClient.SendMessage(
-                                    chatId: chatId.Value,
+                                    chatId: chatId.Value, replyParameters: messageId.Value,
                                     text: "❌ Failed to import Users data. Please ensure the file format is correct.",
                                     cancellationToken: cancellationToken
                                 );
@@ -434,7 +551,7 @@ namespace CustomerMonitoringApp.WPFApp
                         {
                             // Handle unsupported file types
                             await botClient.SendMessage(
-                                chatId: chatId.Value,
+                                chatId: chatId.Value, replyParameters: messageId.Value,
                                 text: "⚠️ The file type is not supported. Please upload a valid .xlsx file.",
                                 cancellationToken: cancellationToken
                             );
@@ -444,7 +561,7 @@ namespace CustomerMonitoringApp.WPFApp
 
                         // Step 4: Inform the user of success and provide summary
                         await botClient.SendMessage(
-                            chatId: chatId.Value,
+                            chatId: chatId.Value, replyParameters: messageId.Value,
                             text: "✅ File processed and data imported successfully!",
                             cancellationToken: cancellationToken
                         );
@@ -454,7 +571,7 @@ namespace CustomerMonitoringApp.WPFApp
                     {
                         // Handle incorrect file types with detailed feedback
                         await botClient.SendMessage(
-                            chatId: chatId.Value,
+                            chatId: chatId.Value, replyParameters: messageId.Value,
                             text: "⚠️ Please upload a valid .xlsx file.",
                             cancellationToken: cancellationToken
                         );
@@ -472,7 +589,7 @@ namespace CustomerMonitoringApp.WPFApp
                 if (chatId != null)
                 {
                     await botClient.SendMessage(
-                        chatId: chatId.Value,
+                        chatId: chatId.Value, replyParameters: messageId.Value,
                         text: "❌ An unexpected error occurred while processing your file. Please try again later.",
                         cancellationToken: cancellationToken
                     );
@@ -480,9 +597,8 @@ namespace CustomerMonitoringApp.WPFApp
             }
             finally
             {
-                // Calculate processing duration and log for performance analysis
-                var duration = DateTime.UtcNow - startTime;
-                Log($"Completed file processing for user {chatId} in {duration.TotalSeconds} seconds.");
+               
+                Log($"Completed file processing for user {chatId}");
             }
 
             // Handle CallbackQuery if applicable
@@ -492,88 +608,268 @@ namespace CustomerMonitoringApp.WPFApp
                 return; // Exit early after handling the callback
             }
         }
-        private async Task HandleHasRecentCallCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        private async Task HandleHasRecentCallCommand(
+       string[] commandParts,
+       long chatId,
+       ITelegramBotClient botClient,
+       CancellationToken cancellationToken,
+       UserState userState)
         {
+            // Check if the user is busy processing a request
+            if (userState.IsBusy)
+            {
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark user as busy while processing this request
+            userState.IsBusy = true;
+
             // Ensure the user provided a valid phone number and a time span
             if (commandParts.Length < 3 || !TimeSpan.TryParse(commandParts[2], out TimeSpan timeSpan))
             {
                 await botClient.SendMessage(chatId, "Usage: /hasrecentcall [phoneNumber] [timeSpan]", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state if input is invalid
                 return;
             }
 
-            var phoneNumber = commandParts[1];
+            try
+            {
+                var phoneNumber = commandParts[1];
 
-            // Check if the phone number has a recent call within the specified time window
-            var hasRecentCall = await _callHistoryRepository.HasRecentCallWithinTimeSpanAsync(phoneNumber, timeSpan);
+                // Check if the phone number has had a recent call within the specified time window
+                var hasRecentCall = await _callHistoryRepository.HasRecentCallWithinTimeSpanAsync(phoneNumber, timeSpan);
 
-            // Send feedback to the user
-            var message = hasRecentCall
-                ? $"✅ The phone number {phoneNumber} has had a recent call within the last {timeSpan.TotalMinutes} minutes."
-                : $"❌ No recent calls found for {phoneNumber} within the last {timeSpan.TotalMinutes} minutes.";
+                // Construct the message based on the result
+                var message = hasRecentCall
+                    ? $"✅ The phone number {phoneNumber} has had a recent call within the last {timeSpan.TotalMinutes} minutes."
+                    : $"❌ No recent calls found for {phoneNumber} within the last {timeSpan.TotalMinutes} minutes.";
 
-            await botClient.SendMessage(chatId, message, cancellationToken: cancellationToken);
+                // Send the result back to the user
+                await botClient.SendMessage(chatId, message, cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Log the error and inform the user about the issue
+                Log($"Error processing the /hasrecentcall command: {ex.Message}");
+                await botClient.SendMessage(
+                    chatId,
+                    "❌ *Error processing command*\n\n" +
+                    "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                    cancellationToken: cancellationToken 
+                );
+            }
+            finally
+            {
+                // Ensure user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
         }
 
-        private async Task HandleGetTopRecentCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+
+        private async Task HandleGetTopRecentCallsCommand(
+     string[] commandParts,
+     long chatId,
+     ITelegramBotClient botClient,
+     CancellationToken cancellationToken,
+     UserState userState)
         {
+            // Check if the user is already processing another request
+            if (userState.IsBusy)
+            {
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark user as busy while processing this request
+            userState.IsBusy = true;
+
             // Ensure the user provided a phone number and the number of rows (calls)
             if (commandParts.Length < 3 || !int.TryParse(commandParts[2], out int topN))
             {
                 await botClient.SendMessage(chatId, "Usage: /gettoprecentcalls [phoneNumber] [numberOfCalls]", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state if input is invalid
                 return;
             }
 
             var phoneNumber = commandParts[1];
 
-            // Get the top N most recent calls for the phone number
-            var topRecentCalls = await _callHistoryRepository.GetTopNRecentCallsAsync(phoneNumber, topN);
-
-            // If no calls are found, send a message to the user
-            if (!topRecentCalls.Any())
+            try
             {
-                await botClient.SendMessage(chatId, $"No recent calls found for {phoneNumber}.", cancellationToken: cancellationToken);
-                return;
+                // Get the top N most recent calls for the phone number
+                var topRecentCalls = await _callHistoryRepository.GetTopNRecentCallsAsync(phoneNumber, topN);
+
+                // If no calls are found, send a message to the user
+                if (!topRecentCalls.Any())
+                {
+                    await botClient.SendMessage(chatId, $"No recent calls found for {phoneNumber}.", cancellationToken: cancellationToken);
+                    userState.IsBusy = false; // Reset user state after processing
+                    return;
+                }
+
+                // Generate a CSV file for the top recent calls
+                var csvFilePath = GenerateCsv(topRecentCalls);
+
+                // Send the CSV file to the user
+                using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+                await botClient.SendDocument(chatId, new InputFileStream(stream, $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_TopRecentCalls.csv"), cancellationToken: cancellationToken);
+
+                // Clean up by deleting the file after sending
+                File.Delete(csvFilePath);
             }
-
-            // Generate a CSV file for the top recent calls
-            var csvFilePath = GenerateCsv(topRecentCalls);
-
-            // Send the CSV file to the user
-            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
-            await botClient.SendDocument(chatId, new InputFileStream(stream, "TopRecentCalls.csv"), cancellationToken: cancellationToken);
-
-            // Clean up by deleting the file after sending
-            File.Delete(csvFilePath);
+            catch (Exception ex)
+            {
+                // Log and notify the user if something goes wrong
+                Log($"Error processing /gettoprecentcalls command: {ex.Message}");
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
+                                                             "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                                                             cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                // Ensure user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
         }
 
 
-        private async Task HandleGetAfterHoursCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+
+        private async Task HandleGetAfterHoursCallsCommand(
+         string[] commandParts,
+         long chatId,
+         ITelegramBotClient botClient,
+         CancellationToken cancellationToken,
+         UserState userState)
         {
-            if (commandParts.Length < 4)
+            // Check if the user is currently processing another request
+            if (userState.IsBusy)
             {
-                await botClient.SendMessage(chatId, "Please provide a phone number, start time, and end time. Example: /getafterhourscalls +1234567890 18:00 06:00", cancellationToken: cancellationToken);
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark user as busy while processing this request
+            userState.IsBusy = true;
+
+            // Validate input: Ensure the user has provided a phone number, start time, and end time
+            if (commandParts.Length < 4 ||
+                !TimeSpan.TryParse(commandParts[2], out TimeSpan startTime) ||
+                !TimeSpan.TryParse(commandParts[3], out TimeSpan endTime))
+            {
+                await botClient.SendMessage(chatId, "Usage: /getafterhourscalls [phoneNumber] [startTime] [endTime]. Example: /getafterhourscalls +1234567890 18:00 06:00", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state in case of invalid input
                 return;
             }
 
             var phoneNumber = commandParts[1];
-            var startTime = TimeSpan.Parse(commandParts[2]);
-            var endTime = TimeSpan.Parse(commandParts[3]);
 
-            var afterHoursCalls = await _callHistoryRepository.GetAfterHoursCallsByPhoneNumberAsync(phoneNumber, startTime, endTime);
+            try
+            {
+                // Retrieve after-hours calls based on the phone number and the provided time window
+                var afterHoursCalls = await _callHistoryRepository.GetAfterHoursCallsByPhoneNumberAsync(phoneNumber, startTime, endTime);
 
-            // Convert to CSV format and send
-            var csvContent = ConvertToCsv(afterHoursCalls);
-            await SendCsvAsync(csvContent, chatId, botClient, cancellationToken);
+                // If no calls are found, notify the user
+                if (!afterHoursCalls.Any())
+                {
+                    await botClient.SendMessage(chatId, $"❌ No after-hours calls found for {phoneNumber} between {startTime} and {endTime}.", cancellationToken: cancellationToken);
+                    userState.IsBusy = false; // Reset user state after processing
+                    return;
+                }
+
+                // Convert the after-hours calls to CSV format
+                var csvContent = ConvertToCsv(afterHoursCalls);
+
+                // Send the CSV content as a file
+                await SendCsvAsync(csvContent, chatId, botClient, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Log and notify the user if something goes wrong
+                Log($"Error processing /getafterhourscalls command: {ex.Message}");
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
+                                                             "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                                                             cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                // Ensure the user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
         }
+
+
+
+        #region Main Conversion Method
+        /// <summary>
+        /// Converts a collection of items to a CSV-formatted string, with custom handling to force Excel to treat strings as text.
+        /// This method can be extended to better handle Excel import by ensuring data is presented in a specific way that mimics a theme.
+        /// </summary>
+        /// <typeparam name="T">The type of items to be converted.</typeparam>
+        /// <param name="items">The collection of items to convert to CSV.</param>
+        /// <returns>A CSV string representation of the collection.</returns>
         private string ConvertToCsv<T>(IEnumerable<T> items)
         {
             using (var writer = new StringWriter())
-            using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)))
+            using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)
             {
+                HasHeaderRecord = true, // Include a header row
+                Delimiter = ",", // Customize delimiter if needed
+                                 // Correcting the ShouldQuote usage to take only one argument: the field value
+                ShouldQuote = (field) => true // Quote all fields
+            }))
+            {
+                // Register custom converter for string types to ensure Excel treats them as text
+                csv.Context.TypeConverterCache.AddConverter<string>(new ApostropheConverter());
+
+                // Write records to CSV
                 csv.WriteRecords(items);
+
                 return writer.ToString();
             }
         }
+
+        #endregion
+
+        #region Custom Type Converter
+
+        /// <summary>
+        /// Custom type converter that adds an apostrophe to the beginning of string values to force Excel to treat them as text.
+        /// This is important for values like large numbers, ZIP codes, or other numeric values that should not be treated as numbers.
+        /// </summary>
+        public class ApostropheConverter : ITypeConverter
+        {
+            /// <summary>
+            /// Converts the value to a string with a prefixed apostrophe to enforce text treatment in Excel.
+            /// Useful for ensuring numeric-like data (e.g., IDs, codes) are treated as text when opened in Excel.
+            /// </summary>
+            /// <param name="value">The object value to convert.</param>
+            /// <param name="row">The current row context.</param>
+            /// <param name="memberMapData">Metadata for the member being mapped.</param>
+            /// <returns>A string prefixed with an apostrophe, or an empty string if null.</returns>
+            public string ConvertToString(object value, IWriterRow row, MemberMapData memberMapData)
+            {
+                // Handle null values
+                if (value == null) return string.Empty;
+
+                // Prefix with an apostrophe to ensure Excel treats as text (important for numeric values)
+                return $"'{value.ToString()}";
+            }
+
+            /// <summary>
+            /// Not implemented. Conversion from string is not required in this scenario.
+            /// </summary>
+            /// <param name="text">The text to convert.</param>
+            /// <param name="row">The row context for the reader.</param>
+            /// <param name="memberMapData">Metadata for the member being mapped.</param>
+            /// <returns>Throws NotImplementedException.</returns>
+            public object ConvertFromString(string text, IReaderRow row, MemberMapData memberMapData)
+            {
+                throw new NotImplementedException("Conversion from string is not implemented.");
+            }
+        }
+
+        #endregion
+
 
         private async Task SendCsvAsync(string csvContent, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
         {
@@ -591,98 +887,283 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
 
-        private async Task HandleGetFrequentCallDatesCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        private async Task HandleGetFrequentCallDatesCommand(
+     string[] commandParts,
+     long chatId,
+     ITelegramBotClient botClient,
+     CancellationToken cancellationToken,
+     UserState userState)
         {
+            // Check if the user is currently processing another request
+            if (userState.IsBusy)
+            {
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark user as busy while processing this request
+            userState.IsBusy = true;
+
+            // Ensure the user has provided a valid phone number
             if (commandParts.Length < 2)
             {
                 await botClient.SendMessage(chatId, "Please provide a phone number. Example: /getfrequentcalldates +1234567890", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state in case of invalid input
                 return;
             }
 
             var phoneNumber = commandParts[1];
-            var frequentCallDates = await _callHistoryRepository.GetFrequentCallDatesByPhoneNumberAsync(phoneNumber);
 
-            // Convert to CSV format and send
-            var csvContent = ConvertToCsv(frequentCallDates);
-            await SendCsvAsync(csvContent, chatId, botClient, cancellationToken);
+            try
+            {
+                // Retrieve frequent call dates for the phone number
+                var frequentCallDates = await _callHistoryRepository.GetFrequentCallDatesByPhoneNumberAsync(phoneNumber);
+
+                // If no data is found, notify the user
+                if (!frequentCallDates.Any())
+                {
+                    await botClient.SendMessage(chatId, $"❌ No frequent call dates found for {phoneNumber}.", cancellationToken: cancellationToken);
+                    userState.IsBusy = false; // Reset user state after processing
+                    return;
+                }
+
+                // Convert the frequent call dates to CSV format
+                var csvContent = ConvertToCsv(frequentCallDates);
+
+                // Send the CSV content as a file
+                await SendCsvAsync(csvContent, chatId, botClient, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Log and notify the user if something goes wrong
+                Log($"Error processing /getfrequentcalldates command: {ex.Message}");
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
+                                                             "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                                                             cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                // Ensure the user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
         }
 
 
-        private async Task HandleGetCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+
+        private async Task HandleGetCallsCommand(
+        string[] commandParts,
+        long chatId,
+        ITelegramBotClient botClient,
+        CancellationToken cancellationToken,
+        UserState userState)
         {
+            // Check if the user is currently processing another request
+            if (userState.IsBusy)
+            {
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark user as busy while processing this request
+            userState.IsBusy = true;
+
+            // Ensure the user provided a phone number
             if (commandParts.Length < 2)
             {
                 await botClient.SendMessage(chatId, "Usage: /getcalls [phoneNumber]", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state after invalid input
                 return;
             }
 
             var phoneNumber = commandParts[1];
-            var callHistories = await _callHistoryRepository.GetCallsByPhoneNumberAsync(phoneNumber);
 
-            if (!callHistories.Any())
+            try
             {
-                await botClient.SendMessage(chatId, "No call history found for this phone number.", cancellationToken: cancellationToken);
-                return;
+                // Retrieve call history for the provided phone number
+                var callHistories = await _callHistoryRepository.GetCallsByPhoneNumberAsync(phoneNumber);
+
+                // If no call history found, notify the user
+                if (!callHistories.Any())
+                {
+                    await botClient.SendMessage(chatId, "No call history found for this phone number.", cancellationToken: cancellationToken);
+                    userState.IsBusy = false; // Reset user state after processing
+                    return;
+                }
+
+                // Generate a CSV file for the call history
+                var csvFilePath = GenerateCsv(callHistories);
+
+                // Send the CSV file to the user
+                using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+                await botClient.SendDocument(chatId, new InputFileStream(stream, $"getcalls_{phoneNumber}_{DateTime.UtcNow:yyyyMMddHHmmss}.csv"), cancellationToken: cancellationToken);
+
+                // Clean up by deleting the temporary file after sending
+                File.Delete(csvFilePath);
             }
-
-            var csvFilePath = GenerateCsv(callHistories);
-            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
-            await botClient.SendDocument(chatId, new InputFileStream(stream, FileNameRegex.ToString()), cancellationToken: cancellationToken);
-
-            File.Delete(csvFilePath);
+            catch (Exception ex)
+            {
+                // Log and notify the user if something goes wrong
+                Log($"Error processing /getcalls command: {ex.Message}");
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
+                                                             "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                                                             cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                // Ensure the user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
         }
 
 
 
-        private async Task HandleGetRecentCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        private async Task HandleGetRecentCallsCommand(
+         string[] commandParts,
+         long chatId,
+         ITelegramBotClient botClient,
+         CancellationToken cancellationToken,
+         UserState userState)
         {
+            // Check if the user is currently processing another request
+            if (userState.IsBusy)
+            {
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark the user as busy while processing this request
+            userState.IsBusy = true;
+
+            // Ensure the user provided both phone number and the days parameter
             if (commandParts.Length < 3 || !int.TryParse(commandParts[2], out int days))
             {
                 await botClient.SendMessage(chatId, "Usage: /getrecentcalls [phoneNumber] [days]", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state after invalid input
                 return;
             }
 
             var phoneNumber = commandParts[1];
-            var startDate = DateTime.UtcNow.AddDays(-days);
-            var recentCalls = await _callHistoryRepository.GetRecentCallsByPhoneNumberAsync(phoneNumber, startDate);
 
-            if (!recentCalls.Any())
+            // Ensure the 'days' value is positive
+            if (days <= 0)
             {
-                await botClient.SendMessage(chatId, "No recent calls found.", cancellationToken: cancellationToken);
+                await botClient.SendMessage(chatId, "Please provide a positive number for days.", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state
                 return;
             }
 
-            var csvFilePath = GenerateCsv(recentCalls);
-            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
-            await botClient.SendDocument(chatId, new InputFileStream(stream, FileNameRegex.ToString()), cancellationToken: cancellationToken);
+            try
+            {
+                // Calculate the start date based on the given days and get the end date as today
+                var startDate = DateTime.UtcNow.AddDays(-days).ToString("yyyy-MM-dd");
+                var endDate = DateTime.UtcNow.ToString("yyyy-MM-dd"); // Use current date as the end date
 
-            File.Delete(csvFilePath);
+                // Retrieve recent calls for the provided phone number
+                var recentCalls = await _callHistoryRepository.GetRecentCallsByPhoneNumberAsync(phoneNumber, startDate, endDate);
+
+                // If no recent calls found, notify the user
+                if (!recentCalls.Any())
+                {
+                    await botClient.SendMessage(chatId, "No recent calls found for this phone number within the specified time frame.", cancellationToken: cancellationToken);
+                    userState.IsBusy = false; // Reset user state
+                    return;
+                }
+
+                // Generate CSV file with recent calls data
+                var csvFilePath = GenerateCsv(recentCalls);
+
+                // Send the CSV file to the user
+                using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+                await botClient.SendDocument(chatId, new InputFileStream(stream, $"getrecentcalls_{phoneNumber}_{DateTime.UtcNow:yyyyMMddHHmmss}.csv"), cancellationToken: cancellationToken);
+
+                // Clean up by deleting the temporary CSV file after sending
+                File.Delete(csvFilePath);
+            }
+            catch (Exception ex)
+            {
+                // Log error and notify user of failure
+                Log($"Error processing /getrecentcalls command: {ex.Message}");
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
+                                                     "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                                                     cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                // Ensure the user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
         }
 
 
-        private async Task HandleGetLongCallsCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+
+        private async Task HandleGetLongCallsCommand(
+      string[] commandParts,
+      long chatId,
+      ITelegramBotClient botClient,
+      CancellationToken cancellationToken,
+      UserState userState)
         {
-            if (commandParts.Length < 3 || !int.TryParse(commandParts[2], out int minimumDuration))
+            // Check if the user is currently processing another request
+            if (userState.IsBusy)
+            {
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark the user as busy while processing this request
+            userState.IsBusy = true;
+
+            // Ensure the user provided both phone number and minimum call duration
+            if (commandParts.Length < 3 || !int.TryParse(commandParts[2], out int minimumDuration) || minimumDuration <= 0)
             {
                 await botClient.SendMessage(chatId, "Usage: /getlongcalls [phoneNumber] [minimumDurationInSeconds]", cancellationToken: cancellationToken);
+                userState.IsBusy = false; // Reset user state after invalid input
                 return;
             }
 
             var phoneNumber = commandParts[1];
-            var longCalls = await _callHistoryRepository.GetLongCallsByPhoneNumberAsync(phoneNumber, minimumDuration);
 
-            if (!longCalls.Any())
+            try
             {
-                await botClient.SendMessage(chatId, "No long calls found.", cancellationToken: cancellationToken);
-                return;
+                // Retrieve the long calls for the provided phone number and minimum duration
+                var longCalls = await _callHistoryRepository.GetLongCallsByPhoneNumberAsync(phoneNumber, minimumDuration);
+
+                // If no long calls are found, notify the user
+                if (!longCalls.Any())
+                {
+                    await botClient.SendMessage(chatId, "No long calls found for this phone number with the specified minimum duration.", cancellationToken: cancellationToken);
+                    userState.IsBusy = false; // Reset user state
+                    return;
+                }
+
+                // Generate CSV file with the long calls data
+                var csvFilePath = GenerateCsv(longCalls);
+
+                // Use a dynamic timestamp for the file name
+                var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+
+                // Send the CSV file to the user
+                using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+                await botClient.SendDocument(chatId, new InputFileStream(stream, $"getlongcalls_{phoneNumber}_{timestamp}.csv"), cancellationToken: cancellationToken);
+
+                // Clean up by deleting the temporary CSV file after sending
+                File.Delete(csvFilePath);
             }
-
-            var csvFilePath = GenerateCsv(longCalls);
-            using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
-            await botClient.SendDocument(chatId, new InputFileStream(stream, FileNameRegex.ToString()), cancellationToken: cancellationToken);
-
-            File.Delete(csvFilePath);
+            catch (Exception ex)
+            {
+                // Log error and notify the user of failure
+                Log($"Error processing /getlongcalls command: {ex.Message}");
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
+                                                     "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                                                     cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                // Ensure the user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
         }
+
 
 
         private string GenerateCsv(IEnumerable<CallHistory> callHistories)
@@ -751,7 +1232,7 @@ namespace CustomerMonitoringApp.WPFApp
                         // Check if any header matches the expected ones
                         if (!expectedHeaders.Contains(header))
                         {
-                            Log($"Error: Invalid header '{header}' at column {col}.");
+                           // Log($"Error: Invalid header '{header}' at column {col}.");
                             return false;
                         }
                     }
@@ -779,7 +1260,8 @@ namespace CustomerMonitoringApp.WPFApp
                         // Skip row if phone numbers are not numeric
                         if (!IsNumeric(sourcePhone) || !IsNumeric(destinationPhone))
                         {
-                            Log($"INFO: Skipping row {row} due to non-numeric phone numbers. Source Phone: '{sourcePhone}', Destination Phone: '{destinationPhone}'");
+                          //
+                          // Log($"INFO: Skipping row {row} due to non-numeric phone numbers. Source Phone: '{sourcePhone}', Destination Phone: '{destinationPhone}'");
                             continue;  // Skip this row and move to the next one
                         }
 
@@ -892,7 +1374,7 @@ namespace CustomerMonitoringApp.WPFApp
                         // Validate the format of Phone Number (e.g., check if it starts with "98" and has the correct number of digits)
                         if (!IsValidPhoneNumber(phoneNumber))
                         {
-                            Log($"Error: Invalid phone number format in row {row}. Phone Number: '{phoneNumber}'");
+                         //   Log($"Error: Invalid phone number format in row {row}. Phone Number: '{phoneNumber}'");
                             return false; // Invalid phone number format
                         }
                    
@@ -910,11 +1392,19 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
         // Helper method to validate Phone Number
+        /// <summary>
+        /// Validates that the provided phone number starts with "09" or "98", has the appropriate length,
+        /// and contains only numeric characters.
+        /// </summary>
+        /// <param name="phoneNumber">The phone number to validate.</param>
+        /// <returns>True if the phone number is valid, false otherwise.</returns>
         private bool IsValidPhoneNumber(string phoneNumber)
         {
-            return phoneNumber.StartsWith("98") && phoneNumber.Length == 12 && phoneNumber.All(char.IsDigit);
+            // Check if phone number starts with "09" and has 11 digits, or starts with "98" and has 12 digits
+            return (phoneNumber.StartsWith("09") && phoneNumber.Length == 11 ||
+                    phoneNumber.StartsWith("98") && phoneNumber.Length == 12)
+                   && phoneNumber.All(char.IsDigit);
         }
-    
 
 
 

@@ -1,5 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using CustomerMonitoringApp.Domain.Entities;
+using Microsoft.EntityFrameworkCore.Design;
 
 namespace CustomerMonitoringApp.Infrastructure.Data
 {
@@ -8,6 +9,19 @@ namespace CustomerMonitoringApp.Infrastructure.Data
     /// </summary>
     public class AppDbContext : DbContext
     {
+
+        public class AppDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
+        {
+            public AppDbContext CreateDbContext(string[] args)
+            {
+                var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
+                optionsBuilder.UseSqlServer("Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True");
+
+                return new AppDbContext(optionsBuilder.Options);
+            }
+        }
+
+
         /// <summary>
         /// Initializes a new instance of the <see cref="AppDbContext"/> class.
         /// </summary>
@@ -85,7 +99,7 @@ namespace CustomerMonitoringApp.Infrastructure.Data
                 // Remove references to 'Date' and 'Time' and use 'CallDateTime' instead
                 entity.Property(e => e.CallDateTime)
                     .IsRequired()
-                    .HasColumnType("datetime"); // Ensures the correct column type for DateTime
+                    .HasColumnType("nvarchar(max)"); // Use nvarchar(max) for Persian string
 
                 entity.Property(e => e.Duration)
                     .IsRequired()

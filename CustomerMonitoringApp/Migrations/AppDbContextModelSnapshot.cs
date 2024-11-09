@@ -30,8 +30,9 @@ namespace CustomerMonitoringApp.Migrations
 
                     SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("CallId"));
 
-                    b.Property<DateTime>("CallDateTime")
-                        .HasColumnType("datetime");
+                    b.Property<string>("CallDateTime")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("CallType")
                         .IsRequired()

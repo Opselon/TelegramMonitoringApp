@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace CustomerMonitoringApp.Migrations
 {
     /// <inheritdoc />
-    public partial class InitialCreate : Migration
+    public partial class NewMigration : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -41,7 +41,7 @@ namespace CustomerMonitoringApp.Migrations
                         .Annotation("SqlServer:Identity", "1, 1"),
                     SourcePhoneNumber = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
                     DestinationPhoneNumber = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    CallDateTime = table.Column<DateTime>(type: "datetime", nullable: false),
+                    CallDateTime = table.Column<string>(type: "nvarchar(max)", nullable: false),
                     Duration = table.Column<int>(type: "int", nullable: false, defaultValue: 0),
                     CallType = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
                     CallerUserId = table.Column<int>(type: "int", nullable: true),

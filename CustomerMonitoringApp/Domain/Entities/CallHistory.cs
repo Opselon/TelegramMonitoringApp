@@ -30,7 +30,7 @@ namespace CustomerMonitoringApp.Domain.Entities
         /// <summary>
         /// The date and time the call occurred.
         /// </summary>
-        public DateTime CallDateTime { get; set; }
+        public string CallDateTime { get; set; }
 
         /// <summary>
         /// The duration of the call in seconds.
@@ -45,9 +45,14 @@ namespace CustomerMonitoringApp.Domain.Entities
 
         // Navigation properties for associated users (caller and recipient)
         public int? CallerUserId { get; set; }
+
         public virtual User CallerUser { get; set; }
 
         public int? RecipientUserId { get; set; }
+
         public virtual User RecipientUser { get; set; }
+
+        // New Field to store the File Name
+        public string FileName { get; set; }  // This is the new field
     }
 }

@@ -13,7 +13,7 @@ namespace CustomerMonitoringApp.Domain.Interfaces
         Task<List<CallHistory>> GetCallsByPhoneNumberAsync(string phoneNumber);
 
         // Retrieves recent call histories for a specific phone number based on a start date
-        Task<List<CallHistory>> GetRecentCallsByPhoneNumberAsync(string phoneNumber, DateTime startDate);
+        Task<List<CallHistory>> GetRecentCallsByPhoneNumberAsync(string phoneNumber, string startDate, string endDateTime);
 
         // Retrieves long calls for a specific phone number that exceed a specified duration
         Task<List<CallHistory>> GetLongCallsByPhoneNumberAsync(string phoneNumber, int minimumDurationInSeconds);
