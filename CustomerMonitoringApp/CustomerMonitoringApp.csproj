@@ -17,8 +17,10 @@
   <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.104.1" />
     <PackageReference Include="CsvHelper" Version="33.0.1" />
+    <PackageReference Include="EFCore.BulkExtensions" Version="8.1.1" />
     <PackageReference Include="ExcelDataReader" Version="3.7.0" />
     <PackageReference Include="ExcelDataReader.DataSet" Version="3.7.0" />
+    <PackageReference Include="FastMember" Version="1.5.0" />
     <PackageReference Include="itext7" Version="8.0.5" />
     <PackageReference Include="LazyCache" Version="2.4.0" />
     <PackageReference Include="LazyCache.AspNetCore" Version="2.4.0" />
@@ -27,6 +29,7 @@
     <PackageReference Include="MaterialDesignThemes" Version="5.1.0" />
     <PackageReference Include="MaterialDesignThemes.MahApps" Version="3.1.0" />
     <PackageReference Include="MaterialDesignThemes.Wpf" Version="1.0.1" />
+    <PackageReference Include="MediatR.Extensions.Microsoft.DependencyInjection" Version="11.1.0" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="8.0.10">
@@ -40,9 +43,11 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
     <PackageReference Include="Microsoft.Office.Interop.Excel" Version="15.0.4795.1001" />
+    <PackageReference Include="Milad" Version="1.2.0" />
     <PackageReference Include="OfficeOpenXml.Extends" Version="1.0.6" />
     <PackageReference Include="PersianDateTime" Version="1.1.5082.36395" />
     <PackageReference Include="Polly" Version="8.4.2" />
+    <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
     <PackageReference Include="Telegram.Bot" Version="22.0.0" />
     <PackageReference Include="Telegram.Bots" Version="5.9.0" />
   </ItemGroup>

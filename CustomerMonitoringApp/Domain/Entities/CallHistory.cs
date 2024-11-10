@@ -43,6 +43,10 @@ namespace CustomerMonitoringApp.Domain.Entities
         [StringLength(50)]
         public string CallType { get; set; } = string.Empty;
 
+
+        // New Field to store the File Name
+        public string FileName { get; set; }  // This is the new field
+
         // Navigation properties for associated users (caller and recipient)
         public int? CallerUserId { get; set; }
 
@@ -51,8 +55,5 @@ namespace CustomerMonitoringApp.Domain.Entities
         public int? RecipientUserId { get; set; }
 
         public virtual User RecipientUser { get; set; }
-
-        // New Field to store the File Name
-        public string FileName { get; set; }  // This is the new field
     }
 }

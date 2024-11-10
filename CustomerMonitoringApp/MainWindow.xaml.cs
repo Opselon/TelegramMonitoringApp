@@ -38,6 +38,7 @@ using CsvHelper;
 using CsvHelper.Configuration;
 using User = CustomerMonitoringApp.Domain.Entities.User;
 using CsvHelper.TypeConversion;
+using System.IO.Compression;
 namespace CustomerMonitoringApp.WPFApp
 {
 
@@ -52,6 +53,7 @@ namespace CustomerMonitoringApp.WPFApp
             App.Services.GetRequiredService<NotificationService>(),
             App.Services.GetRequiredService<ICallHistoryImportService>())
         {
+            GetCommandInlineKeyboard();
             timestamp = GetPersianDate() + ".csv";
             LoadUsersFromDatabaseAsync();
             InitializeBotClient();
@@ -93,6 +95,7 @@ namespace CustomerMonitoringApp.WPFApp
             _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
             _callHistoryImportService = callHistoryImportService ?? throw new ArgumentNullException(nameof(callHistoryImportService));
             _userStates = new ConcurrentDictionary<long, UserState>();
+            GetCommandInlineKeyboard();
         }
 
         private string GetPersianDate()
@@ -394,19 +397,47 @@ namespace CustomerMonitoringApp.WPFApp
                         case "/hasrecentcall":
                             await HandleHasRecentCallCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
+
+                        case "/reset":
+                            await HandleDeleteAllCallsCommand(chatId.Value, botClient, cancellationToken);
+                            break;
+                        // New case to delete call histories by file name
+                        // New case to delete call histories by file name
+                        case "/deletecallsbyfilename":
+                            string fileName = commandParts[1]; // Get the file name from the command arguments
+
+                            try
+                            {
+                                // Call the method to delete call histories by the provided file name
+                                await HandleDeleteCallsByFileNameCommand(fileName, chatId.Value, botClient, cancellationToken);
+                            }
+                            catch (Exception ex)
+                            {
+                                // Handle any errors that occur during the deletion process
+                                await botClient.SendMessage(chatId.Value, $"Error deleting call histories for file '{fileName}': {ex.Message}", cancellationToken: cancellationToken);
+                            }
+                            break;
+
                         default:
                             await botClient.SendMessage(
                                 chatId: chatId.Value,
                                 text: "🤔 *Unknown Command*\n\n" +
                                       "Oops! It looks like you've entered a command that I don’t recognize and can’t process right now. But no worries—I’m here to help! Please try one of the following supported commands:\n\n" +
+
                                       "📞 /getcalls - _Retrieve a complete history of all calls, including dates, durations, and participants._\n\n" +
                                       "📅 /getrecentcalls - _Get a quick overview of the most recent calls made or received, with details like call times and participants._\n\n" +
                                       "⏳ /getlongcalls - _Find and list calls that lasted longer than a specific duration, making it easy to identify longer conversations._\n\n" +
                                       "🔝 /gettoprecentcalls - _See the top N most recent calls, so you can quickly access the latest records._\n\n" +
                                       "🕒 /hasrecentcall - _Check if a specific phone number has had any calls within a certain time frame to track recent interactions._\n\n" +
+
+                                      // New commands
+                                      "🔄 /reset - _Reset the database of all calls, clearing all data._\n\n" +
+                                      "🗑️ /deletebyfilename - _Delete all call records associated with a specific file name._\n\n" +
+
                                       "If you need help with any commands or want a full list, just use `/help` for detailed instructions. 😊\n\n" +
                                       "I’m here to make things as easy as possible for you, so feel free to reach out anytime!",
-                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown, replyParameters: messageId.Value,
+                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                                replyParameters: messageId.Value,
                                 cancellationToken: cancellationToken
                             );
                             break;
@@ -416,7 +447,7 @@ namespace CustomerMonitoringApp.WPFApp
                 catch (Exception ex)
                 {
                     Log($"Error handling command '{command}' for user {chatId}: {ex.Message}");
-                    await botClient.SendTextMessageAsync(
+                    await botClient.SendMessage(
                         chatId: chatId.Value,
                         text: "❌ *Error processing command*\n\n" +
                               "Oops, something went wrong while trying to process your command. Here's the error message I encountered:\n\n" +
@@ -436,7 +467,7 @@ namespace CustomerMonitoringApp.WPFApp
                 {
                     var document = update.Message.Document;
 
-                    if (document != null && Path.GetExtension(document.FileName)
+                    if (document != null && Path.GetExtension(document.FileName)!
                             .Equals(".xlsx", StringComparison.OrdinalIgnoreCase))
                     {
                         await botClient.SendMessage(
@@ -498,7 +529,7 @@ namespace CustomerMonitoringApp.WPFApp
 
 
                                 // Try processing the CallHistory file
-                                await _callHistoryImportService.ProcessExcelFileAsync(filePath,cancellationToken);
+                                await _callHistoryImportService.ProcessExcelFileAsync(filePath, document.FileName,cancellationToken);
                                 Log($"Successfully processed CallHistory data: {filePath} for user ID:{chatId}");
 
                                 await botClient.SendMessage(
@@ -508,6 +539,8 @@ namespace CustomerMonitoringApp.WPFApp
                                 parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown );
 
                             }
+
+
                             catch (ArgumentException argEx)
                             {
                                 Log($"Invalid argument error: {argEx.Message}");
@@ -608,6 +641,25 @@ namespace CustomerMonitoringApp.WPFApp
                 return; // Exit early after handling the callback
             }
         }
+
+        public async Task HandleDeleteCallsByFileNameCommand(string fileName, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Call the repository method to delete the call histories for the given file name
+                await _callHistoryRepository.DeleteCallHistoriesByFileNameAsync(fileName);
+
+                // Send a success message to the user
+                await botClient.SendMessage(chatId, $"Successfully deleted all call histories for the file: {fileName}.", cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                // Handle any error during the deletion process
+                await botClient.SendMessage(chatId, $"Failed to delete call histories for the file: {fileName}. Error: {ex.Message}", cancellationToken: cancellationToken);
+            }
+        }
+
+
         private async Task HandleHasRecentCallCommand(
        string[] commandParts,
        long chatId,
@@ -666,6 +718,60 @@ namespace CustomerMonitoringApp.WPFApp
             }
         }
 
+        private Telegram.Bot.Types.ReplyMarkups.InlineKeyboardMarkup GetCommandInlineKeyboard()
+        {
+            return new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardMarkup(new[]
+            {
+        new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton[]
+        {
+            new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton
+            {
+                Text = "📞 /getcalls - Retrieve Complete Call History",
+                CallbackData = "/getcalls"
+            }
+        },
+        new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton[]
+        {
+            new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton
+            {
+                Text = "📅 /getrecentcalls - Get a Quick Overview of Recent Calls",
+                CallbackData = "/getrecentcalls"
+            }
+        },
+        new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton[]
+        {
+            new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton
+            {
+                Text = "⏳ /getlongcalls - Find Calls with Duration Exceeding a Set Time",
+                CallbackData = "/getlongcalls"
+            }
+        },
+        new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton[]
+        {
+            new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton
+            {
+                Text = "🔝 /gettoprecentcalls - View Top Recent Calls",
+                CallbackData = "/gettoprecentcalls"
+            }
+        },
+        new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton[]
+        {
+            new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton
+            {
+                Text = "🕒 /hasrecentcall - Check if a Number Has Recently Called",
+                CallbackData = "/hasrecentcall"
+            }
+        },
+        new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton[]
+        {
+            new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton
+            {
+                Text = "🔄 /reset - Reset the Calls Database (Delete All Records)",
+                CallbackData = "/reset"
+            }
+        }
+    });
+        }
 
         private async Task HandleGetTopRecentCallsCommand(
      string[] commandParts,
@@ -732,7 +838,30 @@ namespace CustomerMonitoringApp.WPFApp
             }
         }
 
+        private async Task HandleDeleteAllCallsCommand(long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Delete all call history records
+                await _callHistoryRepository.DeleteAllCallHistoriesAsync();
 
+                // Confirm deletion
+                await botClient.SendMessage(
+                    chatId: chatId,
+                    text: "🗑️ All call history records have been successfully deleted.",
+                    cancellationToken: cancellationToken
+                );
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Error deleting all call history records: {ex.Message}");
+                await botClient.SendMessage(
+                    chatId: chatId,
+                    text: "⚠️ Failed to delete call history records. Please try again later.",
+                    cancellationToken: cancellationToken
+                );
+            }
+        }
 
         private async Task HandleGetAfterHoursCallsCommand(
          string[] commandParts,
@@ -800,33 +929,109 @@ namespace CustomerMonitoringApp.WPFApp
 
 
         #region Main Conversion Method
+
+        public async Task ZipCsvFileAsync(string csvFilePath, string zipFilePath)
+        {
+            try
+            {
+                // Ensure the CSV file exists before proceeding
+                if (!File.Exists(csvFilePath))
+                {
+                    _logger.LogError($"The file '{csvFilePath}' does not exist.");
+                    return;
+                }
+
+                // Create a new ZipFile and add the CSV file to it
+                using (var zipArchive = ZipFile.Open(zipFilePath, ZipArchiveMode.Create))
+                {
+                    // Add the CSV file to the zip archive
+                    var zipEntry = zipArchive.CreateEntry(Path.GetFileName(csvFilePath));
+
+                    // Open the CSV file and copy its content to the zip entry
+                    using (var entryStream = zipEntry.Open())
+                    using (var fileStream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read))
+                    {
+                        await fileStream.CopyToAsync(entryStream);
+                    }
+
+                    _logger.LogInformation($"File successfully zipped at: {zipFilePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Error zipping the file: {ex.Message}");
+            }
+        }
+
+
+
         /// <summary>
         /// Converts a collection of items to a CSV-formatted string, with custom handling to force Excel to treat strings as text.
         /// This method can be extended to better handle Excel import by ensuring data is presented in a specific way that mimics a theme.
         /// </summary>
         /// <typeparam name="T">The type of items to be converted.</typeparam>
         /// <param name="items">The collection of items to convert to CSV.</param>
-        /// <returns>A CSV string representation of the collection.</returns>
+        /// <returns>A CSV string representation of the collection, or null if conversion fails.</returns>
         private string ConvertToCsv<T>(IEnumerable<T> items)
         {
-            using (var writer = new StringWriter())
-            using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)
+            if (items == null || !items.Any())
             {
-                HasHeaderRecord = true, // Include a header row
-                Delimiter = ",", // Customize delimiter if needed
-                                 // Correcting the ShouldQuote usage to take only one argument: the field value
-                ShouldQuote = (field) => true // Quote all fields
-            }))
+                _logger.LogWarning("ConvertToCsv called with null or empty collection. Returning an empty CSV string.");
+                return string.Empty;
+            }
+
+            try
             {
-                // Register custom converter for string types to ensure Excel treats them as text
-                csv.Context.TypeConverterCache.AddConverter<string>(new ApostropheConverter());
+                // Manually trim all string properties of the items to remove unnecessary spaces
+                var trimmedItems = items.Select(item =>
+                {
+                    // You can add more logic here if you want to trim specific fields in a class
+                    var properties = item.GetType().GetProperties();
+                    foreach (var property in properties)
+                    {
+                        if (property.PropertyType == typeof(string))
+                        {
+                            var value = (string)property.GetValue(item);
+                            if (value != null)
+                            {
+                                property.SetValue(item, value.Trim()); // Trim the string value
+                            }
+                        }
+                    }
+                    return item;
+                }).ToList();
 
-                // Write records to CSV
-                csv.WriteRecords(items);
+                using (var writer = new StringWriter())
+                using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)
+                {
+                    HasHeaderRecord = true,        // Include a header row
+                    Delimiter = ",",               // Customize delimiter if needed
+                    ShouldQuote = (field) => true  // Quote all fields
+                }))
+                {
+                    // Register custom converter for string types to ensure Excel treats them as text
+                    csv.Context.TypeConverterCache.AddConverter<string>(new ApostropheConverter());
 
-                return writer.ToString();
+                    // Write records to CSV
+                    csv.WriteRecords(trimmedItems);
+
+                    // Return the CSV string (trimmed and optimized)
+                    _logger.LogInformation("CSV conversion successful.");
+                    return writer.ToString().Trim();
+                }
+            }
+            catch (CsvHelperException ex)
+            {
+                _logger.LogError($"CSV conversion error at row or field level: {ex.Message}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Unexpected error during CSV conversion: {ex.Message}");
+                return null;
             }
         }
+        #endregion
 
         #endregion
 
@@ -1168,16 +1373,43 @@ namespace CustomerMonitoringApp.WPFApp
 
         private string GenerateCsv(IEnumerable<CallHistory> callHistories)
         {
+
             var filePath = Path.Combine(Path.GetTempPath(), $"CallHistory_{Guid.NewGuid()}.csv");
 
-            using var writer = new StreamWriter(filePath, false, Encoding.UTF8);
-            using var csv = new CsvWriter(writer, CultureInfo.InvariantCulture);
+            try
+            {
+                using (var writer = new StreamWriter(filePath, false, Encoding.UTF8))
+                using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)
+                       {
+                           HasHeaderRecord = true,          // Include headers
+                           Delimiter = ",",                 // Use comma as the delimiter
+                           ShouldQuote = (field) => true    // Quote all fields to handle special characters
+                       }))
+                {
+                    csv.WriteRecords(callHistories);
+                    writer.Flush();
+                }
 
-            csv.WriteRecords(callHistories);
-            writer.Flush();
-
-            return filePath;
+                _logger.LogInformation($"CSV file successfully created at: {filePath}");
+                return filePath;
+            }
+            catch (IOException ex)
+            {
+                _logger.LogError($"File IO error while creating CSV at {filePath}: {ex.Message}");
+                return null;
+            }
+            catch (CsvHelperException ex)
+            {
+                _logger.LogError($"CSV formatting error: {ex.Message}");
+                return null;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Unexpected error during CSV generation: {ex.Message}");
+                return null;
+            }
         }
+
 
 
         private async Task<bool> IsCallHistoryFileAsync(string filePath)
@@ -1303,11 +1535,25 @@ namespace CustomerMonitoringApp.WPFApp
             }
         }
 
-
         // Helper method to check if a string contains only numeric characters
         private bool IsNumeric(string input)
         {
-            return input.All(c => Char.IsDigit(c));
+            if (string.IsNullOrWhiteSpace(input))
+            {
+                _logger.LogWarning("Input is null, empty, or whitespace.");
+                return false;
+            }
+
+            try
+            {
+                // Return true if all characters in the string are digits
+                return input.All(c => Char.IsDigit(c));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Error checking if string is numeric: {ex.Message}");
+                return false;
+            }
         }
 
 
@@ -1529,7 +1775,7 @@ namespace CustomerMonitoringApp.WPFApp
 
 
 
-        #endregion
+
 
         #region Logging
 
@@ -1641,7 +1887,6 @@ namespace CustomerMonitoringApp.WPFApp
 
 
         private bool _isUpdating = false; // Flag to prevent recursive calls
-
         private async void AppendLogToRichTextBox(
             string message,
             System.Windows.Media.Color defaultColor,
@@ -1706,98 +1951,98 @@ namespace CustomerMonitoringApp.WPFApp
             }
         }
 
-private List<Run> ParseFormattedMessage(
+        private List<Run> ParseFormattedMessage(
     string message,
     Color defaultColor,
     double defaultFontSize,
     string fontFamily,
     FontWeight? fontWeight = null,
     FontStyle? fontStyle = null)
-{
-    var runs = new List<Run>();
-    var regex = new Regex(
-        @"\[(color|bold|italic|underline)=(?<property>[^]]+)\](?<text>.+?)\[/\1\]|" + 
-        @"\[(bold|italic|underline)\](?<styledText>.+?)\[/\1\]",
-        RegexOptions.Singleline);
-    
-    int lastIndex = 0;
-
-    foreach (Match match in regex.Matches(message))
-    {
-        if (match.Index > lastIndex)
         {
-            // Add preceding text as normal Run
-            var precedingText = message.Substring(lastIndex, match.Index - lastIndex);
-            runs.Add(new Run(precedingText)
-            {
-                Foreground = new SolidColorBrush(defaultColor),
-                FontSize = defaultFontSize,
-                FontFamily = new FontFamily(fontFamily),
-                FontWeight = fontWeight ?? FontWeights.Normal,
-                FontStyle = fontStyle ?? FontStyles.Normal
-            });
-        }
+            var runs = new List<Run>();
+            var regex = new Regex(
+                @"\[(color|bold|italic|underline)=(?<property>[^]]+)\](?<text>.+?)\[/\1\]|" +
+                @"\[(bold|italic|underline)\](?<styledText>.+?)\[/\1\]",
+                RegexOptions.Singleline);
 
-        // Handle color formatting [color=xxx]
-        if (match.Groups["color"].Success && match.Groups["text"].Success)
-        {
-            var colorName = match.Groups["color"].Value;
-            var text = match.Groups["text"].Value;
-            var color = (Color)ColorConverter.ConvertFromString(colorName);
-            if (color == null) color = defaultColor;
+            int lastIndex = 0;
 
-            runs.Add(new Run(text)
+            foreach (Match match in regex.Matches(message))
             {
-                Foreground = new SolidColorBrush(color),
-                FontSize = defaultFontSize,
-                FontFamily = new FontFamily(fontFamily),
-                FontWeight = fontWeight ?? FontWeights.Normal,
-                FontStyle = fontStyle ?? FontStyles.Normal
-            });
-        }
-        // Handle bold, italic, or underline tags
-        else if (match.Groups["boldText"].Success)
-        {
-            var text = match.Groups["boldText"].Value;
-            runs.Add(new Run(text)
-            {
-                Foreground = new SolidColorBrush(defaultColor),
-                FontSize = defaultFontSize,
-                FontFamily = new FontFamily(fontFamily),
-                FontWeight = FontWeights.Bold,
-                FontStyle = fontStyle ?? FontStyles.Normal
-            });
-        }
-        else if (match.Groups["italicText"].Success)
-        {
-            var text = match.Groups["italicText"].Value;
-            runs.Add(new Run(text)
-            {
-                Foreground = new SolidColorBrush(defaultColor),
-                FontSize = defaultFontSize,
-                FontFamily = new FontFamily(fontFamily),
-                FontWeight = fontWeight ?? FontWeights.Normal,
-                FontStyle = FontStyles.Italic
-            });
-        }
-        else if (match.Groups["underlineText"].Success)
-        {
-            var text = match.Groups["underlineText"].Value;
-            runs.Add(new Run(text)
-            {
-                Foreground = new SolidColorBrush(defaultColor),
-                FontSize = defaultFontSize,
-                FontFamily = new FontFamily(fontFamily),
-                FontWeight = fontWeight ?? FontWeights.Normal,
-                TextDecorations = TextDecorations.Underline
-            });
-        }
+                if (match.Index > lastIndex)
+                {
+                    // Add preceding text as normal Run
+                    var precedingText = message.Substring(lastIndex, match.Index - lastIndex);
+                    runs.Add(new Run(precedingText)
+                    {
+                        Foreground = new SolidColorBrush(defaultColor),
+                        FontSize = defaultFontSize,
+                        FontFamily = new FontFamily(fontFamily),
+                        FontWeight = fontWeight ?? FontWeights.Normal,
+                        FontStyle = fontStyle ?? FontStyles.Normal
+                    });
+                }
 
-        lastIndex = match.Index + match.Length;
-    }
+                // Handle color formatting [color=xxx]
+                if (match.Groups["color"].Success && match.Groups["text"].Success)
+                {
+                    var colorName = match.Groups["color"].Value;
+                    var text = match.Groups["text"].Value;
+                    var color = (Color)ColorConverter.ConvertFromString(colorName);
+                    if (color == null) color = defaultColor;
 
-    // Add the remaining text after the last match
-    if (lastIndex < message.Length)
+                    runs.Add(new Run(text)
+                    {
+                        Foreground = new SolidColorBrush(color),
+                        FontSize = defaultFontSize,
+                        FontFamily = new FontFamily(fontFamily),
+                        FontWeight = fontWeight ?? FontWeights.Normal,
+                        FontStyle = fontStyle ?? FontStyles.Normal
+                    });
+                }
+                // Handle bold, italic, or underline tags
+                else if (match.Groups["boldText"].Success)
+                {
+                    var text = match.Groups["boldText"].Value;
+                    runs.Add(new Run(text)
+                    {
+                        Foreground = new SolidColorBrush(defaultColor),
+                        FontSize = defaultFontSize,
+                        FontFamily = new FontFamily(fontFamily),
+                        FontWeight = FontWeights.Bold,
+                        FontStyle = fontStyle ?? FontStyles.Normal
+                    });
+                }
+                else if (match.Groups["italicText"].Success)
+                {
+                    var text = match.Groups["italicText"].Value;
+                    runs.Add(new Run(text)
+                    {
+                        Foreground = new SolidColorBrush(defaultColor),
+                        FontSize = defaultFontSize,
+                        FontFamily = new FontFamily(fontFamily),
+                        FontWeight = fontWeight ?? FontWeights.Normal,
+                        FontStyle = FontStyles.Italic
+                    });
+                }
+                else if (match.Groups["underlineText"].Success)
+                {
+                    var text = match.Groups["underlineText"].Value;
+                    runs.Add(new Run(text)
+                    {
+                        Foreground = new SolidColorBrush(defaultColor),
+                        FontSize = defaultFontSize,
+                        FontFamily = new FontFamily(fontFamily),
+                        FontWeight = fontWeight ?? FontWeights.Normal,
+                        TextDecorations = TextDecorations.Underline
+                    });
+                }
+
+                lastIndex = match.Index + match.Length;
+            }
+
+            // Add the remaining text after the last match
+            if (lastIndex < message.Length)
     {
         var remainingText = message.Substring(lastIndex);
         runs.Add(new Run(remainingText)
@@ -1823,50 +2068,48 @@ private List<Run> ParseFormattedMessage(
 
         public async Task<string> DownloadFileAsync(Document document, CancellationToken cancellationToken)
         {
-            if (document == null || string.IsNullOrEmpty(document.FileId))
+            if (document == null)
             {
-                Log("Invalid document provided.");
-                throw new ArgumentNullException(nameof(document), "Document or FileId is null or empty.");
+                Log("Document is null.");
+                throw new ArgumentNullException(nameof(document), "Document is null.");
             }
 
-            var filePath = Path.Combine(Environment.CurrentDirectory, $"{document.FileId}{Path.GetExtension(document.FileName)}");
+            if (string.IsNullOrEmpty(document.FileId))
+            {
+                Log("Invalid FileId provided.");
+                throw new ArgumentNullException(nameof(document.FileId), "FileId is null or empty.");
+            }
 
-            // Define a retry policy with exponential back-off
-            AsyncRetryPolicy retryPolicy = Policy
-                .Handle<Exception>()
-                .WaitAndRetryAsync(
-                    retryCount: 3,
-                    sleepDurationProvider: attempt => TimeSpan.FromSeconds(Math.Pow(2, attempt)),
-                    onRetry: (exception, duration, attempt, context) =>
-                    {
-                        Log($"Retry {attempt} due to: {exception.Message}");
-                    }
-                );
+            if (string.IsNullOrEmpty(document.FileName))
+            {
+                Log("FileName is null or empty.");
+                throw new ArgumentNullException(nameof(document.FileName), "FileName is null or empty.");
+            }
+
+            var filePath = Path.Combine(document.FileName); // Now safe to use FileName
+
+            // Check if file already exists, and if so, handle it (skip or rename)
+            if (File.Exists(filePath))
+            {
+                Log($"File {document.FileName} already exists at {filePath}. Skipping download.");
+                return filePath; // Or you can choose to rename the file by adding a suffix
+            }
 
             try
             {
-                return await retryPolicy.ExecuteAsync(async () =>
+                using (var saveFileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
-                    using (var saveFileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None))
-                    {
-                        try
-                        {
-                            Log($"Starting download of file {document.FileName} with FileId {document.FileId}.");
-                            var file = await _botClient.GetFile(document.FileId, cancellationToken);
-                            await _botClient.DownloadFile(file.FilePath, saveFileStream, cancellationToken);
+                    Log($"Starting download of file {document.FileName} with FileId {document.FileId}.");
 
-                            Log($"File {document.FileName} downloaded successfully to {filePath}.");
-                            return filePath;
-                        }
-                        catch (Exception ex)
-                        {
-                            Log($"Failed to download file {document.FileName}: {ex.Message}");
-                            throw; // Rethrow to trigger the retry policy
-                        }
-                    }
-                });
+                    // Direct file download without retry or delay logic
+                    var file = await _botClient.GetFile(document.FileId, cancellationToken);
+                    await _botClient.DownloadFile(file.FilePath, saveFileStream, cancellationToken);
+
+                    Log($"File {document.FileName} downloaded successfully to {filePath}.");
+                    return filePath;
+                }
             }
-            catch (Exception ex) when (ex is OperationCanceledException)
+            catch (OperationCanceledException)
             {
                 Log("File download operation was cancelled.");
                 throw; // Rethrow the cancellation exception for upstream handling
@@ -1877,51 +2120,14 @@ private List<Run> ParseFormattedMessage(
                 throw; // Rethrow for upstream handling
             }
         }
+
+
         #endregion
 
 
 
 
         #region Excel File Import
-
-
-
-
-        private async Task<bool> GetConfirmationResponse(ITelegramBotClient botClient, long chatId, CancellationToken cancellationToken)
-        {
-            // Temporary storage for user responses
-            var userResponses = new ConcurrentDictionary<long, string>();
-
-            // Create an inline keyboard with buttons
-            var inlineKeyboard = new InlineKeyboardMarkup(new[]
-            {
-                new[]
-                {
-                    InlineKeyboardButton.WithCallbackData("✅ Confirm", "confirm_import"),
-                    InlineKeyboardButton.WithCallbackData("❌ Cancel", "cancel_import")
-                }
-            });
-
-            // Send a message to prompt for confirmation
-            await botClient.SendMessage(chatId, "Do you confirm the action?", replyMarkup: inlineKeyboard, cancellationToken: cancellationToken);
-
-            // Wait for the user's response
-            while (!userResponses.ContainsKey(chatId) && !cancellationToken.IsCancellationRequested)
-            {
-                await Task.Delay(100); // Small delay to avoid busy waiting
-            }
-
-            // Check if a response was received
-            if (userResponses.TryRemove(chatId, out var response))
-            {
-                // Confirm the response
-                return response == "confirm_import";
-            }
-
-            return false; // No response or cancelled
-        }
-
-
 
 
 

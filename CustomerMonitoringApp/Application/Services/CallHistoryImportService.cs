@@ -13,6 +13,8 @@ using System.Globalization;
 using Microsoft.Data.SqlClient;
 using System.Data;
 using System.Threading.Tasks.Dataflow;
+using Microsoft.EntityFrameworkCore.Storage;
+using FastMember;
 
 namespace CustomerMonitoringApp.Application.Services
 {
@@ -21,6 +23,7 @@ namespace CustomerMonitoringApp.Application.Services
     {
         private readonly ILogger<CallHistoryImportService> _logger;
         private readonly ICallHistoryRepository _callHistoryRepository;
+        private static readonly PersianCalendar PersianCalendar = new PersianCalendar(); // Static instance to reuse across calls
 
         // Injecting the logger and repository through the constructor.
         public CallHistoryImportService(ILogger<CallHistoryImportService> logger,
@@ -32,8 +35,9 @@ namespace CustomerMonitoringApp.Application.Services
             _logger.LogInformation("CallHistoryImportService initialized.");
         }
 
+
         // Public method to process the Excel file.
-        public async Task ProcessExcelFileAsync(string filePath, CancellationToken cancellationToken = default)
+        public async Task ProcessExcelFileAsync(string filePath, string fileName, CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrEmpty(filePath))
             {
@@ -49,11 +53,11 @@ namespace CustomerMonitoringApp.Application.Services
                 // Step 2: Check if we have any valid records
                 if (records.Any())
                 {
-                    // Step 3: Convert to DataTable asynchronously
-                    var dataTable = await ConvertToDataTable(records, cancellationToken); // Await the async method
+                    // Step 3: Convert to DataTable asynchronously with the file name
+                    var dataTable = ConvertToDataTable(records, fileName);
 
                     // Step 4: Save the records with retry logic
-                    await SaveRecordsWithRetryAsync(dataTable);
+                    await SaveRecordsAsync(dataTable);
                 }
                 else
                 {
@@ -77,152 +81,47 @@ namespace CustomerMonitoringApp.Application.Services
             }
         }
 
-        // متد کمکی برای تبدیل List<CallHistory> به DataTable
-        public async Task<DataTable> ConvertToDataTable(List<CallHistory> records, CancellationToken cancellationToken = default)
+
+
+        private DataTable ConvertToDataTable(List<CallHistory> records, string fileName)
         {
             var dataTable = new DataTable("CallHistory");
 
             // Define columns with constraints
             dataTable.Columns.Add(new DataColumn("SourcePhoneNumber", typeof(string)) { MaxLength = 15 });
             dataTable.Columns.Add(new DataColumn("DestinationPhoneNumber", typeof(string)) { MaxLength = 15 });
-            dataTable.Columns.Add(new DataColumn("CallDateTime", typeof(DateTime)));
+            dataTable.Columns.Add("CallDateTime", typeof(string));
             dataTable.Columns.Add(new DataColumn("Duration", typeof(int)) { DefaultValue = 0 });
             dataTable.Columns.Add(new DataColumn("CallType", typeof(string)) { MaxLength = 50 });
+            dataTable.Columns.Add(new DataColumn("FileName", typeof(string)) { MaxLength = 255 });
 
-
-
-
-
-            // Set Primary Key if needed for uniqueness
-            dataTable.PrimaryKey = new DataColumn[] { dataTable.Columns["SourcePhoneNumber"], dataTable.Columns["DestinationPhoneNumber"], dataTable.Columns["CallDateTime"] };
-
-            // Block for processing rows in parallel with Dataflow
-            var addRowBlock = new ActionBlock<CallHistory>(async record =>
+            // Use FastMember ObjectReader for bulk conversion
+            using (var reader = ObjectReader.Create(records, "SourcePhoneNumber", "DestinationPhoneNumber", "CallDateTime", "Duration", "CallType"))
             {
-                if (cancellationToken.IsCancellationRequested)
+                // Bulk add the records in a single operation
+                foreach (var record in reader)
                 {
-                    _logger?.LogInformation("Cancellation requested. Skipping further processing.");
-                    return; // Early exit if cancellation is requested
-                }
+                    // Cast the 'record' object to the CallHistory type
+                    var callHistory = record as CallHistory;
 
-                try
-                {
-                    if (IsValidRecord(record))
+                    if (callHistory != null)
                     {
                         var row = dataTable.NewRow();
-                        row["SourcePhoneNumber"] = record.SourcePhoneNumber;
-                        row["DestinationPhoneNumber"] = record.DestinationPhoneNumber;
-                        row["CallDateTime"] = record.CallDateTime;
-                        row["Duration"] = Math.Max(0, record.Duration);
-                        row["CallType"] = record.CallType ?? "Unknown";
+                        row["SourcePhoneNumber"] = callHistory.SourcePhoneNumber?.Length > 15 ? callHistory.SourcePhoneNumber.Substring(0, 15) : callHistory.SourcePhoneNumber;
+                        row["DestinationPhoneNumber"] = callHistory.DestinationPhoneNumber?.Length > 15 ? callHistory.DestinationPhoneNumber.Substring(0, 15) : callHistory.DestinationPhoneNumber;
+                        row["CallDateTime"] = callHistory.CallDateTime ?? "dd/MM/yyyy";
+                        row["Duration"] = callHistory.Duration;
+                        row["CallType"] = callHistory.CallType ?? "Unknown";
+                        row["FileName"] = fileName;
 
-                        // Asynchronously add row to DataTable using a semaphore for thread safety
-                        await Task.Run(() =>
-                        {
-                            lock (dataTable) // Ensure thread-safety when modifying DataTable
-                            {
-                                dataTable.Rows.Add(row);
-                            }
-                        }, cancellationToken);
+                        // Add row to DataTable
+                        dataTable.Rows.Add(row);
                     }
-                    else
-                    {
-                        _logger?.LogWarning($"Skipping invalid record: {record?.SourcePhoneNumber} -> {record?.DestinationPhoneNumber}.");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogError($"Error processing record ({record?.SourcePhoneNumber} -> {record?.DestinationPhoneNumber}): {ex.Message}");
-                }
-            },
-            new ExecutionDataflowBlockOptions
-            {
-                MaxDegreeOfParallelism = Environment.ProcessorCount, // Optimal parallelism
-                CancellationToken = cancellationToken
-            });
-
-            try
-            {
-                // Add records asynchronously to the ActionBlock
-                foreach (var record in records)
-                {
-                    if (cancellationToken.IsCancellationRequested)
-                        break;
-
-                    await addRowBlock.SendAsync(record, cancellationToken);
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError($"Error converting records to DataTable asynchronously: {ex.Message}");
-                throw;
-            }
-            finally
-            {
-                try
-                {
-                    // Mark the block as complete and wait for all tasks to finish
-                    addRowBlock.Complete();
-                    await addRowBlock.Completion;
-                }
-                catch (Exception ex)
-                {
-                    _logger?.LogError($"Error completing ActionBlock processing: {ex.Message}");
-                    throw;
                 }
             }
 
             return dataTable;
         }
-
-        // Helper method to validate each CallHistory record
-        private bool IsValidRecord(CallHistory record)
-        {
-            // Check if the record is null
-            if (record == null)
-            {
-                _logger?.LogWarning("Null CallHistory record found.");
-                return false;
-            }
-
-            // Validate SourcePhoneNumber (non-empty, correct length, and correct format)
-            if (string.IsNullOrWhiteSpace(record.SourcePhoneNumber))
-            {
-                _logger?.LogWarning($"SourcePhoneNumber is missing or empty for record {record?.CallDateTime}");
-                return false;
-            }
-
-            if (record.SourcePhoneNumber.Length < 10 || record.SourcePhoneNumber.Length > 15) // Example length validation
-            {
-                _logger?.LogWarning($"SourcePhoneNumber '{record.SourcePhoneNumber}' is invalid length for record {record?.CallDateTime}");
-                return false;
-            }
-
-            // Validate DestinationPhoneNumber (non-empty, correct length, and correct format)
-            if (string.IsNullOrWhiteSpace(record.DestinationPhoneNumber))
-            {
-                _logger?.LogWarning($"DestinationPhoneNumber is missing or empty for record {record?.CallDateTime}");
-                return false;
-            }
-
-            if (record.DestinationPhoneNumber.Length < 10 || record.DestinationPhoneNumber.Length > 15) // Example length validation
-            {
-                _logger?.LogWarning($"DestinationPhoneNumber '{record.DestinationPhoneNumber}' is invalid length for record {record?.CallDateTime}");
-                return false;
-            }
-
-            // Additional checks can be added as needed (e.g., CallType validation, Duration validation)
-            if (string.IsNullOrWhiteSpace(record.CallType))
-            {
-                _logger?.LogWarning($"CallType is missing for record {record?.SourcePhoneNumber} -> {record?.DestinationPhoneNumber}");
-                record.CallType = "Unknown"; // Default value to prevent null
-            }
-
-            // If all checks passed, return true indicating the record is valid
-            return true;
-        }
-
-
 
         // Method to parse the Excel file
         private async Task<List<CallHistory>> ParseExcelFileAsync(string filePath)
@@ -239,42 +138,24 @@ namespace CustomerMonitoringApp.Application.Services
 
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
-                    var worksheets = package.Workbook.Worksheets;
-                    if (worksheets.Count == 0)
+                    var worksheet = package.Workbook.Worksheets.FirstOrDefault();
+                    if (worksheet == null || worksheet.Dimension == null || worksheet.Dimension.Rows <= 1)
                     {
-                        _logger.LogError("The Excel file contains no worksheets.");
-                        return records;
-                    }
-
-                    _logger.LogInformation($"The workbook contains {worksheets.Count} worksheet(s).");
-
-                    var worksheet = worksheets.FirstOrDefault();
-                    if (worksheet == null)
-                    {
-                        _logger.LogError("No valid worksheet found in the workbook.");
-                        return records;
-                    }
-
-                    if (worksheet.Dimension == null || worksheet.Dimension.Rows <= 1 ||
-                        worksheet.Dimension.Columns == 0)
-                    {
-                        _logger.LogError("The worksheet is empty, has no rows, or invalid columns.");
+                        _logger.LogError("Invalid or empty worksheet.");
                         return records;
                     }
 
                     var rowCount = worksheet.Dimension.Rows;
                     var colCount = worksheet.Dimension.Columns;
-                    _logger.LogInformation($"The worksheet has {rowCount} rows and {colCount} columns.");
+                    _logger.LogInformation($"Processing {rowCount} rows and {colCount} columns.");
 
-                    // Add logging for rows processed
+                    // Process rows with parallelization or simple loop depending on the environment
                     for (int row = 2; row <= rowCount; row++)
                     {
-                        _logger.LogInformation($"Processing row {row} of {rowCount}.");
                         var rowValues = worksheet.Cells[row, 1, row, colCount].Select(c => c.Text.Trim()).ToList();
                         if (rowValues.All(string.IsNullOrEmpty))
                         {
-                            _logger.LogInformation($"Skipping empty row {row}.");
-                            continue;
+                            continue; // Skip empty rows
                         }
 
                         var record = await ParseRowAsync(worksheet, row);
@@ -304,57 +185,41 @@ namespace CustomerMonitoringApp.Application.Services
         {
             try
             {
-                var sourcePhone = worksheet.Cells[row, 1].Text.Trim();
-                var destinationPhone = worksheet.Cells[row, 2].Text.Trim();
-                var persianDate = worksheet.Cells[row, 3].Text.Trim();
-                var callTime = worksheet.Cells[row, 4].Text.Trim();
-                var durationText = worksheet.Cells[row, 5].Text.Trim();
-                var callType = worksheet.Cells[row, 6].Text.Trim();
+                var sourcePhone = worksheet.Cells[row, 1]?.Text;
+                var destinationPhone = worksheet.Cells[row, 2]?.Text;
+                var persianDate = worksheet.Cells[row, 3]?.Text;
+                var callTime = worksheet.Cells[row, 4]?.Text;
+                var durationText = worksheet.Cells[row, 5]?.Text;
+                var callType = worksheet.Cells[row, 6]?.Text;
 
-                _logger.LogInformation(
-                    $"Row {row} - SourcePhone: {sourcePhone}, DestinationPhone: {destinationPhone}, CallDate: {persianDate}, CallTime: {callTime}, Duration: {durationText}, CallType: {callType}");
-
-                // Handle missing or invalid fields
                 if (string.IsNullOrWhiteSpace(sourcePhone) || string.IsNullOrWhiteSpace(destinationPhone) ||
                     string.IsNullOrWhiteSpace(persianDate) || string.IsNullOrWhiteSpace(callTime) ||
                     string.IsNullOrWhiteSpace(durationText) || string.IsNullOrWhiteSpace(callType))
                 {
-                    _logger.LogWarning($"Skipping row {row} due to missing data.");
-                    return null;
+                    return null; // Skip row if any mandatory field is missing
                 }
 
-                // Convert Persian date to Gregorian DateTime
-                DateTime callDateTime;
-                if (!TryParsePersianDate(persianDate, out callDateTime))  // Removed callTime from the method call
+                if (!TryParsePersianDate(persianDate, out DateTime callDateTime) ||
+                    !TryParseCallTime(callTime, out TimeSpan parsedTime))
                 {
-                    _logger.LogWarning($"Skipping row {row} due to invalid date/time format.");
-                    return null;
+                    return null; // Skip row if date or time parsing fails
                 }
 
-                // Combine callTime with callDateTime if needed, e.g., setting the time part of callDateTime
-                // You may need additional logic here to handle time merging if `callTime` is in a specific format
+                callDateTime = callDateTime.Add(parsedTime);
 
-                // Parse duration (allowing zero duration for SMS)
-                int duration = 0;
-                if (!int.TryParse(durationText, out duration) || duration < 0)
+                if (!int.TryParse(durationText, out int duration) || duration < 0)
                 {
-                    _logger.LogWarning($"Skipping row {row} due to invalid duration.");
-                    return null;
+                    return null; // Skip row if duration is invalid
                 }
 
-                // Normalize call type to English or preferred format
-                string normalizedCallType = NormalizeCallType(callType);
-
-                var record = new CallHistory
+                return new CallHistory
                 {
-                    SourcePhoneNumber = sourcePhone,
-                    DestinationPhoneNumber = destinationPhone,
-                    CallDateTime = ConvertToPersianDate(callDateTime),
+                    SourcePhoneNumber = sourcePhone.Trim(),
+                    DestinationPhoneNumber = destinationPhone.Trim(),
+                    CallDateTime = callDateTime.ToString() ?? "بدون تاریخ",
                     Duration = duration,
-                    CallType = normalizedCallType
+                    CallType = callType?.Trim() ?? "Unknown"
                 };
-
-                return record;
             }
             catch (Exception ex)
             {
@@ -364,173 +229,97 @@ namespace CustomerMonitoringApp.Application.Services
         }
 
 
-        public string ConvertToPersianDate(DateTime dateTime)
+        private bool TryParseCallTime(string callTime, out TimeSpan result)
         {
-            try
-            {
-                // Check if the date is valid for Persian conversion (based on typical Persian calendar ranges)
-                if (dateTime < new DateTime(622, 3, 21) || dateTime > new DateTime(9999, 12, 31))
-                {
-                    return "Invalid Date Range"; // Handle out-of-range dates
-                }
+            result = default;
+            if (string.IsNullOrWhiteSpace(callTime)) return false;
 
-                // Attempt to convert to Persian date
-                var persianDate = new PersianDateTime(dateTime);
-                return persianDate.ToString("yyyy/MM/dd"); // Persian format
-            }
-            catch (Exception ex)
-            {
-                // Log the error if required
-                _logger?.LogError($"Error converting to Persian date: {ex.Message}");
-
-                // Return default value to avoid exceptions
-                return "Conversion Error";
-            }
+            return TimeSpan.TryParseExact(callTime.Trim(), new[] { "hh\\:mm\\:ss", "hh\\:mm" }, CultureInfo.InvariantCulture, out result);
         }
 
-        // متد برای تبدیل تاریخ فارسی به میلادی
-        // متد برای تبدیل تاریخ فارسی به میلادی با استفاده از مقدار پیش‌فرض در صورت نامعتبر بودن تاریخ
+
+
+        // Method to convert Persian date (e.g., 1403/04/31) to Gregorian DateTime
         private bool TryParsePersianDate(string persianDate, out DateTime result)
         {
-            result = DateTime.Today; // مقدار پیش‌فرض برای تاریخ‌های نامعتبر
+            result = DateTime.MinValue; // Default value for invalid dates
             try
             {
-                // فرض بر این است که persianDate به فرمت yyyy/MM/dd است.
-                string[] dateParts = persianDate.Split('/');
-                if (dateParts.Length == 3)
+                // Assume the date is in yyyy/MM/dd format
+                // Parse directly without allocating extra array
+                if (persianDate.Length == 10 && persianDate[4] == '/' && persianDate[7] == '/')
                 {
-                    int year = int.Parse(dateParts[0]);
-                    int month = int.Parse(dateParts[1]);
-                    int day = int.Parse(dateParts[2]);
+                    // Parse parts directly from the string
+                    int year = int.Parse(persianDate.Substring(0, 4));
+                    int month = int.Parse(persianDate.Substring(5, 2));
+                    int day = int.Parse(persianDate.Substring(8, 2));
 
-                    PersianCalendar persianCalendar = new PersianCalendar();
-
-                    // کنترل برای روزهای نامعتبر (به‌طور مثال اگر روز 31 در ماه‌های خاصی وجود نداشته باشد)
-                    if (month > 12 || day > 31 || (month > 6 && day > 30))
+                    // Check if the month is valid
+                    if (month < 1 || month > 12)
                     {
-                        _logger.LogWarning($"Invalid day or month in Persian date '{persianDate}', using default date.");
-                        return false; // نشان می‌دهد که تاریخ نامعتبر بوده است
+                        _logger.LogWarning($"Invalid month {month} in Persian date '{persianDate}', using default date.");
+                        return false; // Invalid month
                     }
 
-                    result = persianCalendar.ToDateTime(year, month, day, 0, 0, 0, 0); // بدون ساعت
+                    // Validate the number of days in the month
+                    int maxDaysInMonth = PersianCalendar.GetDaysInMonth(year, month);
+                    if (day < 1 || day > maxDaysInMonth)
+                    {
+                        _logger.LogWarning($"Invalid day {day} for month {month} in Persian date '{persianDate}', using default date.");
+                        return false; // Invalid day
+                    }
+
+                    // Convert Persian date to Gregorian date
+                    result = PersianCalendar.ToDateTime(year, month, day, 0, 0, 0, 0); // Time is set to 00:00:00
                     return true;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Error parsing Persian date: {ex.Message}");
+                _logger.LogError($"Error parsing Persian date '{persianDate}': {ex.Message}");
             }
 
             _logger.LogWarning($"Using default date for Persian date '{persianDate}' due to parsing failure.");
-            return false; // نشان می‌دهد که تاریخ نامعتبر بوده است
+            return false; // Invalid date
         }
 
 
 
-        // Method to normalize the call type string to English or a preferred format
-        private string NormalizeCallType(string callType)
+        public async Task SaveRecordsAsync(DataTable dataTable)
         {
-            if (string.IsNullOrWhiteSpace(callType))
-            {
-                return "Unknown"; // در صورت خالی یا نامعتبر بودن ورودی
-            }
+            IDbContextTransaction transaction = null;
 
-            // نرمال‌سازی برای حالت‌های مختلف
-            callType = callType.ToLowerInvariant();
+            try
+            {
+                // Begin a transaction
+                transaction = await _callHistoryRepository.BeginTransactionAsync();
 
-            // بررسی انواع مختلف پیامک
-            if (callType.Contains("پیام") || callType.Contains("sms") || callType.Contains("message"))
-            {
-                return "SMS";
-            }
-            // بررسی انواع تماس‌های صوتی
-            else if (callType.Contains("تماس") || callType.Contains("voice") || callType.Contains("call") || callType.Contains("صدا"))
-            {
-                return "Voice Call";
-            }
-            // بررسی نوع ارتباطات داده‌ای و اینترنتی
-            else if (callType.Contains("اینترنت") || callType.Contains("data") || callType.Contains("gprs") ||
-                     callType.Contains("internet") || callType.Contains("irancell") || callType.Contains("online"))
-            {
-                return "Data/Internet";
-            }
-            // دسته‌بندی انواع دیگر تماس‌ها (برای اپراتور همراه اول)
-            else if (callType.Contains("mci") || callType.Contains("همراه اول") || callType.Contains("mtn"))
-            {
-                return "MCI";
-            }
-            // دسته‌بندی انواع دیگر تماس‌ها (برای اپراتور ایرانسل)
-            else if (callType.Contains("ایرانسل") || callType.Contains("irancell") || callType.Contains("irc") ||
-                     callType.Contains("mtc"))
-            {
-                return "Irancell";
-            }
-            // دسته‌بندی برای موارد تبلیغاتی و پیامک‌های تبلیغاتی
-            else if (callType.Contains("تبلیغات") || callType.Contains("ad") || callType.Contains("promotion") ||
-                     callType.Contains("advertisement"))
-            {
-                return "Advertisement";
-            }
-            // بررسی برای نوع تماس بین‌المللی یا رومینگ
-            else if (callType.Contains("رومینگ") || callType.Contains("بین المللی") || callType.Contains("international") ||
-                     callType.Contains("roaming"))
-            {
-                return "International/Roaming";
-            }
-            // اگر نوع تماس مشخص نباشد و در هیچ دسته دیگری قرار نگیرد
-            else
-            {
-                return "Other";
-            }
-        }
+                // Perform the bulk insert or other database operations
+                await _callHistoryRepository.SaveBulkDataAsync(dataTable);
 
+                // Commit the transaction if everything is successful
+                await _callHistoryRepository.CommitTransactionAsync(transaction);
 
-        // Method to save records to the database with retry policy
-        private async Task SaveRecordsWithRetryAsync(DataTable dataTable)
-        {
-            var retryPolicy = Policy
-                .Handle<Exception>()
-                .WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
-                    (exception, timeSpan, context) =>
-                    {
-                        _logger.LogError($"Error during data saving: {exception.Message}. Retrying in {timeSpan.TotalSeconds} seconds.");
-                    });
-
-            await retryPolicy.ExecuteAsync(async () =>
+                _logger.LogInformation("Data successfully saved to the database.");
+            }
+            catch (Exception ex)
             {
-                using (var connection = new SqlConnection("Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True"))
+                // Rollback the transaction if an error occurs
+                if (transaction != null)
                 {
-                    await connection.OpenAsync();
-
-                    // استفاده از تراکنش SQL Server
-                    using (var transaction = connection.BeginTransaction())
-                    using (var sqlBulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.TableLock, transaction))
-                    {
-                        sqlBulkCopy.DestinationTableName = "CallHistories";
-                        sqlBulkCopy.BatchSize = 100000;
-                        sqlBulkCopy.EnableStreaming = true;
-
-                        foreach (DataColumn column in dataTable.Columns)
-                        {
-                            sqlBulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
-                        }
-
-                        try
-                        {
-                            await sqlBulkCopy.WriteToServerAsync(dataTable);
-                            transaction.Commit(); // در صورت موفقیت آمیز بودن، تراکنش تایید می‌شود
-                            _logger.LogInformation("Data successfully saved to the database.");
-                        }
-                        catch (Exception ex)
-                        {
-                            transaction.Rollback(); // در صورت بروز خطا، تراکنش بازگشت داده می‌شود
-                            _logger.LogError($"Error during SqlBulkCopy operation: {ex.Message}. Rolling back transaction.");
-                            throw;
-                        }
-                    }
+                    await _callHistoryRepository.RollbackTransactionAsync(transaction);
                 }
-            });
-        
-    }
+
+                _logger.LogError($"Error during data saving: {ex.Message}");
+                throw; // Rethrow the exception to let the caller handle it
+            }
+            finally
+            {
+                // Dispose of the transaction to release resources
+                transaction?.Dispose();
+            }
+        }
+
+
     }
 }

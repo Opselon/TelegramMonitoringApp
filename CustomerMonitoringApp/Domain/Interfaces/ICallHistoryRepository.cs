@@ -1,6 +1,8 @@
 ﻿using CustomerMonitoringApp.Domain.Entities;
+using Microsoft.EntityFrameworkCore.Storage;
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.Threading.Tasks;
 
 namespace CustomerMonitoringApp.Domain.Interfaces
@@ -9,6 +11,7 @@ namespace CustomerMonitoringApp.Domain.Interfaces
     {
         Task AddCallHistoryAsync(List<CallHistory> records);
 
+           Task SaveBulkDataAsync(DataTable dataTable);
         // Retrieves all call histories for a specific phone number
         Task<List<CallHistory>> GetCallsByPhoneNumberAsync(string phoneNumber);
 
@@ -29,5 +32,13 @@ namespace CustomerMonitoringApp.Domain.Interfaces
 
         // Checks if a phone number has been contacted within a specified time window
         Task<bool> HasRecentCallWithinTimeSpanAsync(string phoneNumber, TimeSpan timeSpan);
+        // New method to delete all call histories from the database
+        Task DeleteAllCallHistoriesAsync();
+        // New method to delete all call histories where the file name is "X"
+        Task DeleteCallHistoriesByFileNameAsync(string fileName);
+        Task<IDbContextTransaction> BeginTransactionAsync(); // Start a transaction
+        Task CommitTransactionAsync(IDbContextTransaction transaction); // Commit the transaction
+        Task RollbackTransactionAsync(IDbContextTransaction transaction); // Rollback if needed
+
     }
 }
