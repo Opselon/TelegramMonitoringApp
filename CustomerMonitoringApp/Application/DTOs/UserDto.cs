@@ -40,7 +40,7 @@ namespace CustomerMonitoringApp.Application.DTOs
         /// <summary>
         /// Gets or sets the birth date file associated with the user.
         /// </summary>
-        public DateTime? UserBirthDayFile { get; set; }
+        public string? UserBirthDayFile { get; set; }
 
         /// <summary>
         /// Gets or sets the address file associated with the user.

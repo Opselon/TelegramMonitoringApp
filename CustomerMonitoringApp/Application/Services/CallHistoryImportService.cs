@@ -93,35 +93,29 @@ namespace CustomerMonitoringApp.Application.Services
             dataTable.Columns.Add("CallDateTime", typeof(string));
             dataTable.Columns.Add(new DataColumn("Duration", typeof(int)) { DefaultValue = 0 });
             dataTable.Columns.Add(new DataColumn("CallType", typeof(string)) { MaxLength = 50 });
-            dataTable.Columns.Add(new DataColumn("FileName", typeof(string)) { MaxLength = 255 });
+            dataTable.Columns.Add(new DataColumn("FileName", typeof(string)) { MaxLength = 255 }); // Add FileName column
 
-            // Use FastMember ObjectReader for bulk conversion
-            using (var reader = ObjectReader.Create(records, "SourcePhoneNumber", "DestinationPhoneNumber", "CallDateTime", "Duration", "CallType"))
+            // Add records to DataTable
+            foreach (var record in records)
             {
-                // Bulk add the records in a single operation
-                foreach (var record in reader)
-                {
-                    // Cast the 'record' object to the CallHistory type
-                    var callHistory = record as CallHistory;
+                var row = dataTable.NewRow();
 
-                    if (callHistory != null)
-                    {
-                        var row = dataTable.NewRow();
-                        row["SourcePhoneNumber"] = callHistory.SourcePhoneNumber?.Length > 15 ? callHistory.SourcePhoneNumber.Substring(0, 15) : callHistory.SourcePhoneNumber;
-                        row["DestinationPhoneNumber"] = callHistory.DestinationPhoneNumber?.Length > 15 ? callHistory.DestinationPhoneNumber.Substring(0, 15) : callHistory.DestinationPhoneNumber;
-                        row["CallDateTime"] = callHistory.CallDateTime ?? "dd/MM/yyyy";
-                        row["Duration"] = callHistory.Duration;
-                        row["CallType"] = callHistory.CallType ?? "Unknown";
-                        row["FileName"] = fileName;
+                // Ensure phone numbers do not exceed MaxLength
+                row["SourcePhoneNumber"] = record.SourcePhoneNumber?.Length > 15 ? record.SourcePhoneNumber.Substring(0, 15) : record.SourcePhoneNumber;
+                row["DestinationPhoneNumber"] = record.DestinationPhoneNumber?.Length > 15 ? record.DestinationPhoneNumber.Substring(0, 15) : record.DestinationPhoneNumber;
 
-                        // Add row to DataTable
-                        dataTable.Rows.Add(row);
-                    }
-                }
+                row["CallDateTime"] = record.CallDateTime ?? "dd/MM/yyyy";
+                row["Duration"] = record.Duration;
+                row["CallType"] = record.CallType ?? "Unknown";  // Default value if CallType is null
+                row["FileName"] = fileName; // Add FileName to DataTable
+
+                dataTable.Rows.Add(row);
             }
 
             return dataTable;
         }
+
+
 
         // Method to parse the Excel file
         private async Task<List<CallHistory>> ParseExcelFileAsync(string filePath)
@@ -138,24 +132,42 @@ namespace CustomerMonitoringApp.Application.Services
 
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
-                    var worksheet = package.Workbook.Worksheets.FirstOrDefault();
-                    if (worksheet == null || worksheet.Dimension == null || worksheet.Dimension.Rows <= 1)
+                    var worksheets = package.Workbook.Worksheets;
+                    if (worksheets.Count == 0)
                     {
-                        _logger.LogError("Invalid or empty worksheet.");
+                        _logger.LogError("The Excel file contains no worksheets.");
+                        return records;
+                    }
+
+                    _logger.LogInformation($"The workbook contains {worksheets.Count} worksheet(s).");
+
+                    var worksheet = worksheets.FirstOrDefault();
+                    if (worksheet == null)
+                    {
+                        _logger.LogError("No valid worksheet found in the workbook.");
+                        return records;
+                    }
+
+                    if (worksheet.Dimension == null || worksheet.Dimension.Rows <= 1 ||
+                        worksheet.Dimension.Columns == 0)
+                    {
+                        _logger.LogError("The worksheet is empty, has no rows, or invalid columns.");
                         return records;
                     }
 
                     var rowCount = worksheet.Dimension.Rows;
                     var colCount = worksheet.Dimension.Columns;
-                    _logger.LogInformation($"Processing {rowCount} rows and {colCount} columns.");
+                    _logger.LogInformation($"The worksheet has {rowCount} rows and {colCount} columns.");
 
-                    // Process rows with parallelization or simple loop depending on the environment
+                    // Add logging for rows processed
                     for (int row = 2; row <= rowCount; row++)
                     {
+                        _logger.LogInformation($"Processing row {row} of {rowCount}.");
                         var rowValues = worksheet.Cells[row, 1, row, colCount].Select(c => c.Text.Trim()).ToList();
                         if (rowValues.All(string.IsNullOrEmpty))
                         {
-                            continue; // Skip empty rows
+                            _logger.LogInformation($"Skipping empty row {row}.");
+                            continue;
                         }
 
                         var record = await ParseRowAsync(worksheet, row);
@@ -239,6 +251,28 @@ namespace CustomerMonitoringApp.Application.Services
 
 
 
+
+
+        public string ConvertToPersianDate(DateTime dateTime)
+        {
+            try
+            {
+                if (dateTime < new DateTime(622, 3, 21) || dateTime > new DateTime(9999, 12, 31)) return "Invalid Date Range";
+
+                var persianCalendar = new PersianCalendar();
+                int year = persianCalendar.GetYear(dateTime);
+                int month = persianCalendar.GetMonth(dateTime);
+                int day = persianCalendar.GetDayOfMonth(dateTime);
+
+                return $"{year}/{month:D2}/{day:D2}";
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError($"Error converting DateTime to Persian date: {ex.Message}");
+                return "Conversion Error";
+            }
+        }
+
         // Method to convert Persian date (e.g., 1403/04/31) to Gregorian DateTime
         private bool TryParsePersianDate(string persianDate, out DateTime result)
         {
@@ -246,13 +280,14 @@ namespace CustomerMonitoringApp.Application.Services
             try
             {
                 // Assume the date is in yyyy/MM/dd format
-                // Parse directly without allocating extra array
-                if (persianDate.Length == 10 && persianDate[4] == '/' && persianDate[7] == '/')
+                string[] dateParts = persianDate.Split('/');
+                if (dateParts.Length == 3)
                 {
-                    // Parse parts directly from the string
-                    int year = int.Parse(persianDate.Substring(0, 4));
-                    int month = int.Parse(persianDate.Substring(5, 2));
-                    int day = int.Parse(persianDate.Substring(8, 2));
+                    int year = int.Parse(dateParts[0]);
+                    int month = int.Parse(dateParts[1]);
+                    int day = int.Parse(dateParts[2]);
+
+                    PersianCalendar persianCalendar = new PersianCalendar();
 
                     // Check if the month is valid
                     if (month < 1 || month > 12)
@@ -262,7 +297,7 @@ namespace CustomerMonitoringApp.Application.Services
                     }
 
                     // Validate the number of days in the month
-                    int maxDaysInMonth = PersianCalendar.GetDaysInMonth(year, month);
+                    int maxDaysInMonth = persianCalendar.GetDaysInMonth(year, month);
                     if (day < 1 || day > maxDaysInMonth)
                     {
                         _logger.LogWarning($"Invalid day {day} for month {month} in Persian date '{persianDate}', using default date.");
@@ -270,7 +305,7 @@ namespace CustomerMonitoringApp.Application.Services
                     }
 
                     // Convert Persian date to Gregorian date
-                    result = PersianCalendar.ToDateTime(year, month, day, 0, 0, 0, 0); // Time is set to 00:00:00
+                    result = persianCalendar.ToDateTime(year, month, day, 0, 0, 0, 0); // Time is set to 00:00:00
                     return true;
                 }
             }
@@ -285,22 +320,24 @@ namespace CustomerMonitoringApp.Application.Services
 
 
 
+
         public async Task SaveRecordsAsync(DataTable dataTable)
         {
             IDbContextTransaction transaction = null;
 
             try
             {
-                // Begin a transaction
+                // Begin a transaction and log it
                 transaction = await _callHistoryRepository.BeginTransactionAsync();
+                _logger.LogInformation($"Transaction started for saving {dataTable.Rows.Count} records.");
 
-                // Perform the bulk insert or other database operations
+                // Perform the bulk insert and confirm row count in the log
                 await _callHistoryRepository.SaveBulkDataAsync(dataTable);
+                _logger.LogInformation($"Attempted to save {dataTable.Rows.Count} records to the database.");
 
-                // Commit the transaction if everything is successful
+                // Commit the transaction
                 await _callHistoryRepository.CommitTransactionAsync(transaction);
-
-                _logger.LogInformation("Data successfully saved to the database.");
+                _logger.LogInformation("Data successfully saved and transaction committed.");
             }
             catch (Exception ex)
             {
@@ -311,11 +348,11 @@ namespace CustomerMonitoringApp.Application.Services
                 }
 
                 _logger.LogError($"Error during data saving: {ex.Message}");
-                throw; // Rethrow the exception to let the caller handle it
+                throw;
             }
             finally
             {
-                // Dispose of the transaction to release resources
+                // Dispose of the transaction
                 transaction?.Dispose();
             }
         }

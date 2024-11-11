@@ -81,7 +81,7 @@ namespace CustomerMonitoringApp.Application.Commands
                             UserBirthDayFile = userDto.UserBirthDayFile,
                             UserAddressFile = userDto.UserAddressFile,
                             UserDescriptionFile = userDto.UserDescriptionFile,
-                            UserSourceFile = userDto.UserSourceFile
+                            UserSourceFile = userDto.UserSourceFile,
                         };
 
                         // Add the user to the database

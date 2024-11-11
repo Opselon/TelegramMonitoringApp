@@ -1,5 +1,6 @@
 ﻿using Microsoft.EntityFrameworkCore;
 using CustomerMonitoringApp.Domain.Entities;
+using CustomerMonitoringApp.Domain.Views;
 using Microsoft.EntityFrameworkCore.Design;
 
 namespace CustomerMonitoringApp.Infrastructure.Data
@@ -39,6 +40,12 @@ namespace CustomerMonitoringApp.Infrastructure.Data
         /// </summary>
         public DbSet<UserPermission> UserPermissions { get; set; }
 
+
+        /// <summary>
+        /// The CallHistoryWithUserNames View for the combined call and user data.
+        /// </summary>
+        public DbSet<CallHistoryWithUserNames> CallHistoryWithUserNames { get; set; }
+
         /// <summary>
         /// Configures the model properties and relationships.
         /// </summary>
@@ -47,43 +54,7 @@ namespace CustomerMonitoringApp.Infrastructure.Data
         {
             base.OnModelCreating(modelBuilder);
 
-            // Configure the User entity
-            modelBuilder.Entity<User>(entity =>
-            {
-                entity.HasKey(e => e.UserId); // Set the primary key
-
-                entity.Property(e => e.UserNameFile)
-                      .IsRequired()
-                      .HasMaxLength(100); // Set max length and required
-
-                entity.Property(e => e.UserTelegramID)
-                      .IsRequired(); // Set as required field
-
-                // Configure the relationship between User and UserPermission
-                entity.HasMany(e => e.UserPermissions) // Navigation property
-                      .WithOne(up => up.User) // Related entity
-                      .HasForeignKey(up => up.UserTelegramID) // Specify foreign key
-                      .OnDelete(DeleteBehavior.Cascade); // Define delete behavior
-            });
-
-            // Configure the UserPermission entity
-            modelBuilder.Entity<UserPermission>(entity =>
-            {
-                entity.HasKey(e => e.PermissionId); // Set the primary key
-
-                entity.Property(e => e.PermissionType)
-                      .IsRequired()
-                      .HasMaxLength(50); // Set max length and required
-
-                entity.Property(e => e.UserTelegramID)
-                      .IsRequired(); // Set as required field
-
-                // Configure the relationship back to User
-                entity.HasOne(up => up.User) // Navigation property
-                      .WithMany(u => u.UserPermissions) // Related entity
-                      .HasForeignKey(up => up.UserTelegramID) // Specify foreign key
-                      .OnDelete(DeleteBehavior.Cascade); // Define delete behavior
-            });
+         
             modelBuilder.Entity<CallHistory>(entity =>
             {
                 entity.HasKey(e => e.CallId);
@@ -108,17 +79,6 @@ namespace CustomerMonitoringApp.Infrastructure.Data
                 entity.Property(e => e.CallType)
                     .IsRequired()
                     .HasMaxLength(50);
-
-                // Define relationships with the User entity for Caller and Recipient
-                entity.HasOne(e => e.CallerUser)
-                    .WithMany() // Optional: User can have many CallHistories as caller
-                    .HasForeignKey(e => e.CallerUserId)
-                    .OnDelete(DeleteBehavior.Restrict); // Prevent cascading delete
-
-                entity.HasOne(e => e.RecipientUser)
-                    .WithMany() // Optional: User can have many CallHistories as recipient
-                    .HasForeignKey(e => e.RecipientUserId)
-                    .OnDelete(DeleteBehavior.Restrict); // Prevent cascading delete
             });
         }
     }

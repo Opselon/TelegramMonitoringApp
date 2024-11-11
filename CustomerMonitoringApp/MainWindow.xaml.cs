@@ -39,6 +39,8 @@ using CsvHelper.Configuration;
 using User = CustomerMonitoringApp.Domain.Entities.User;
 using CsvHelper.TypeConversion;
 using System.IO.Compression;
+using CustomerMonitoringApp.Application.Interfaces;
+using CustomerMonitoringApp.Domain.Views;
 namespace CustomerMonitoringApp.WPFApp
 {
 
@@ -288,15 +290,49 @@ namespace CustomerMonitoringApp.WPFApp
         private const int MessageWindowInSeconds = 60; // Time window to count the messages (e.g., 60 seconds)
 
         // Checks if a message has been processed by its MessageId
+        /// <summary>
+        /// Tracks the timestamp of the last messages for each chatId, with a 5-minute timeout to avoid excessive message queueing.
+        /// Maintains only recent timestamps within a specific time threshold, optimizing memory usage.
+        /// </summary>
+        /// <param name="chatId">Unique identifier for the chat.</param>
         private void TrackMessageTimestamp(long chatId)
         {
-            var now = DateTime.UtcNow;
+            // Define the message retention threshold and timeout duration
+            TimeSpan messageRetentionThreshold = TimeSpan.FromMinutes(1); // Time to keep recent messages
+            TimeSpan requestTimeout = TimeSpan.FromMinutes(5); // Max time allowed between requests
+
+            DateTime now = DateTime.UtcNow;
+
+            // Initialize queue if it does not already exist for this chatId
             if (!_messageTimestamps.ContainsKey(chatId))
             {
                 _messageTimestamps[chatId] = new Queue<DateTime>();
             }
+
             var messageQueue = _messageTimestamps[chatId];
+
+            // Check if the last message timestamp exceeds the request timeout
+            if (messageQueue.Count > 0 && (now - messageQueue.Last()) > requestTimeout)
+            {
+                // Reset the queue if the timeout has passed
+                messageQueue.Clear();
+            }
+
+            // Remove timestamps older than the retention threshold to keep only recent messages
+            while (messageQueue.Count > 0 && (now - messageQueue.Peek()) > messageRetentionThreshold)
+            {
+                messageQueue.Dequeue();
+            }
+
+            // Enqueue the current timestamp to record this message
             messageQueue.Enqueue(now);
+
+            // Optional: Implement a maximum queue size to limit memory usage
+            int maxQueueSize = 100; // Define max queue size based on expected message frequency
+            if (messageQueue.Count > maxQueueSize)
+            {
+                messageQueue.Dequeue(); // Remove the oldest message if queue exceeds max size
+            }
         }
         private bool HasMessageBeenProcessed(long chatId, int messageId)
         {
@@ -330,24 +366,25 @@ namespace CustomerMonitoringApp.WPFApp
             return false;
         }
 
+        #region Command Handler
 
         private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update,
-            CancellationToken cancellationToken)
+          CancellationToken cancellationToken)
         {
             var chatId = update.Message?.Chat?.Id;
             var messageId = update.Message?.MessageId;
-       
+
 
             if (chatId == null || messageId == null)
             {
-                Log("Error: Invalid chatId or messageId.");
+             //   Log("Error: Invalid chatId or messageId.");
                 return;
             }
 
             // Anti-Spam: Check if the user is spamming by checking the message frequency
             if (IsSpamming(chatId.Value))
             {
-                Log($"Spam detected from ChatId {chatId}. Skipping message.");
+              //  Log($"Spam detected from ChatId {chatId}. Skipping message.");
                 return; // Skip processing if the user is spamming
             }
 
@@ -360,7 +397,7 @@ namespace CustomerMonitoringApp.WPFApp
                 Log($"Message with ID {messageId} from ChatId {chatId} already processed. Skipping.");
                 return;
             }
- 
+
 
             // Initialize or fetch user state
             var userState = _userStates.GetOrAdd(chatId.Value, new UserState());
@@ -397,7 +434,9 @@ namespace CustomerMonitoringApp.WPFApp
                         case "/hasrecentcall":
                             await HandleHasRecentCallCommand(commandParts, chatId.Value, botClient, cancellationToken, userState);
                             break;
-
+                        case "/getallcalls":
+                            await HandleAllCallWithName(commandParts, chatId.Value, botClient, cancellationToken, userState);
+                            break;
                         case "/reset":
                             await HandleDeleteAllCallsCommand(chatId.Value, botClient, cancellationToken);
                             break;
@@ -429,8 +468,8 @@ namespace CustomerMonitoringApp.WPFApp
                                       "⏳ /getlongcalls - _Find and list calls that lasted longer than a specific duration, making it easy to identify longer conversations._\n\n" +
                                       "🔝 /gettoprecentcalls - _See the top N most recent calls, so you can quickly access the latest records._\n\n" +
                                       "🕒 /hasrecentcall - _Check if a specific phone number has had any calls within a certain time frame to track recent interactions._\n\n" +
-
-                                      // New commands
+                                      "📞 /getallcalls - _Retrieve a complete history of all calls, including dates, durations, and participants._\n\n" +  // New /getallcalls command
+                                                                                                                                                           // New commands
                                       "🔄 /reset - _Reset the database of all calls, clearing all data._\n\n" +
                                       "🗑️ /deletebyfilename - _Delete all call records associated with a specific file name._\n\n" +
 
@@ -488,7 +527,7 @@ namespace CustomerMonitoringApp.WPFApp
                         try
                         {
                             filePath = await DownloadFileAsync(document, cancellationToken);
-                            Log($"File downloaded successfully: {filePath}");
+                         //   Log($"File downloaded successfully: {filePath}");
                             await botClient.SendMessage(
                                 chatId: chatId.Value,
                                 text: "🧲 File downloaded successfully", replyParameters: messageId.Value,
@@ -497,7 +536,7 @@ namespace CustomerMonitoringApp.WPFApp
                         }
                         catch (Exception downloadEx)
                         {
-                            Log($"Error downloading file from user {chatId}: {downloadEx.Message}");
+                       //     Log($"Error downloading file from user {chatId}: {downloadEx.Message}");
                             await botClient.SendMessage(
                                 chatId: chatId.Value, replyParameters: messageId.Value,
                                 text: "❌ Error downloading the file. Please try again.",
@@ -505,7 +544,7 @@ namespace CustomerMonitoringApp.WPFApp
                             );
                             return;
                         }
-       
+
                         // Step 3: Identify file type (CallHistory or UsersUpdate)
                         bool isCallHistory = await IsCallHistoryFileAsync(filePath);
                         bool isUserFile = await IsUserFile(filePath);
@@ -529,14 +568,14 @@ namespace CustomerMonitoringApp.WPFApp
 
 
                                 // Try processing the CallHistory file
-                                await _callHistoryImportService.ProcessExcelFileAsync(filePath, document.FileName,cancellationToken);
+                                await _callHistoryImportService.ProcessExcelFileAsync(filePath, document.FileName, cancellationToken);
                                 Log($"Successfully processed CallHistory data: {filePath} for user ID:{chatId}");
 
                                 await botClient.SendMessage(
                                     chatId: chatId.Value, replyParameters: messageId.Value,
-                                    text: "✅ *Database operations complete, and users added successfully!* \n\n", 
+                                    text: "✅ *Database operations complete, and users added successfully!* \n\n",
                                     cancellationToken: cancellationToken,
-                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown );
+                                parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
 
                             }
 
@@ -566,7 +605,7 @@ namespace CustomerMonitoringApp.WPFApp
                             // Process Users Update data
                             try
                             {
-                               // await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
+                                await ImportExcelToDatabase(filePath, botClient, chatId.Value, cancellationToken);
                                 Log($"File processed and users data saved: {filePath}");
                             }
                             catch (Exception ex)
@@ -630,7 +669,7 @@ namespace CustomerMonitoringApp.WPFApp
             }
             finally
             {
-               
+
                 Log($"Completed file processing for user {chatId}");
             }
 
@@ -641,6 +680,10 @@ namespace CustomerMonitoringApp.WPFApp
                 return; // Exit early after handling the callback
             }
         }
+
+
+
+        #region Delete Files From File
 
         public async Task HandleDeleteCallsByFileNameCommand(string fileName, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken)
         {
@@ -658,6 +701,14 @@ namespace CustomerMonitoringApp.WPFApp
                 await botClient.SendMessage(chatId, $"Failed to delete call histories for the file: {fileName}. Error: {ex.Message}", cancellationToken: cancellationToken);
             }
         }
+
+        #endregion
+
+
+
+        #endregion
+
+
 
 
         private async Task HandleHasRecentCallCommand(
@@ -717,6 +768,192 @@ namespace CustomerMonitoringApp.WPFApp
                 userState.IsBusy = false;
             }
         }
+
+        /// <summary>
+        /// Retrieves the user details based on phone number and sends it to the user via Telegram.
+        /// </summary>
+        /// <summary>
+        /// Sends user details to a Telegram chat based on the phone number.
+        /// </summary>
+        /// <param name="phoneNumber">The phone number of the user.</param>
+        /// <param name="chatId">The Telegram chat ID to send the details to.</param>
+        /// <param name="cancellationToken">Token to cancel the operation if needed.</param>
+        public async Task SendUserDetailsToTelegramAsync(string phoneNumber, long chatId, CancellationToken cancellationToken)
+        {
+            try
+            {
+                // Fetch user details by phone number
+                var user = await _callHistoryRepository.GetUserDetailsByPhoneNumberAsync(phoneNumber);
+
+                // Check if user was found
+                if (user == null)
+                {
+                    await _botClient.SendMessage(
+                        chatId: chatId,
+                        text: "❌ *No user found with the provided phone number.* Please try again with a valid phone number.",
+                        parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                        cancellationToken: cancellationToken
+                    );
+                    return;
+                }
+
+                // Format the message with user details
+                var message = $"👤 *User Details for Phone Number {user.UserNumberFile}*:\n\n" +
+                              $"📞 *Phone Number*: {user.UserNumberFile ?? "Not Available"}\n" +
+                              $"👤 *Full Name*: {user.UserNameFile ?? "Not Available"} {user.UserFamilyFile ?? "Not Available"}\n" +
+                              $"🧔 *Father's Name*: {user.UserFatherNameFile ?? "Not Available"}\n" +
+                              $"🎂 *Date of Birth*: {user.UserBirthDayFile ?? "Not Available"}\n" +
+                              $"🏠 *Address*: {user.UserAddressFile ?? "Not Available"}\n" +
+                              $"📱 *Telegram ID*: {user.UserTelegramID?.ToString() ?? "Not Available"}\n" +
+                              $"💬 *Description*: {user.UserDescriptionFile ?? "Not Available"}\n" +
+                              $"🌍 *Source*: {user.UserSourceFile ?? "Not Available"}\n" +
+                              $"🔢 *User ID*: {user.UserId}\n";
+
+                // Send the user details message to Telegram
+                await _botClient.SendMessage(
+                    chatId: chatId,
+                    text: message,
+                    parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                    cancellationToken: cancellationToken
+                );
+            }
+            catch (Exception ex)
+            {
+                // Handle exceptions by logging the error and sending a generic error message to Telegram
+                // Log the exception (log code not shown here, replace with your logging mechanism)
+                Console.WriteLine($"Error sending user details to Telegram: {ex.Message}");
+
+                // Send an error message to the Telegram chat
+                await _botClient.SendMessage(
+                    chatId: chatId,
+                    text: "⚠️ An error occurred while retrieving user details. Please try again later.",
+                    parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown,
+                    cancellationToken: cancellationToken
+                );
+            }
+        }
+
+
+        private async Task HandleAllCallWithName(
+       string[] commandParts,
+       long chatId,
+       ITelegramBotClient botClient,
+       CancellationToken cancellationToken,
+       UserState userState)
+        {
+            // Check if the user is busy processing a request
+            if (userState.IsBusy)
+            {
+                await botClient.SendMessage(chatId, "⚠️ You are currently processing a request. Please wait until it is completed.", cancellationToken: cancellationToken);
+                return;
+            }
+
+            // Mark user as busy while processing this request
+            userState.IsBusy = true;
+
+            // Ensure the user provided a valid phone number
+            if (commandParts.Length < 2)
+            {
+                await botClient.SendMessage(chatId, "Usage: /getallcalls [phoneNumber]", cancellationToken: cancellationToken);
+                userState.IsBusy = false;
+                return;
+            }
+
+            var phoneNumber = commandParts[1];
+
+            try
+            {
+                await SendUserDetailsToTelegramAsync(phoneNumber, chatId, cancellationToken);
+                // Fetch all calls for the provided phone number
+                var calls = await _callHistoryRepository.GetCallsWithUserNamesAsync(phoneNumber);
+            
+                // If no calls found, inform the user
+                if (calls == null || !calls.Any())
+                {
+                    await botClient.SendMessage(chatId, $"❌ No calls found for the phone number {phoneNumber}.", cancellationToken: cancellationToken);
+                    return;
+                }
+
+                // Generate the CSV file for the call history
+                var csvFilePath = GenerateCsv(calls);
+
+                // Send the CSV file to the user
+                using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+                await botClient.SendDocument(chatId, new InputFileStream(stream, $"All_Calls_{phoneNumber}_{DateTime.UtcNow:yyyyMMddHHmmss}.csv"), cancellationToken: cancellationToken);
+
+                // Notify the user that the file has been sent
+                await botClient.SendMessage(chatId, "📁 Your call history has been sent in a CSV file.", cancellationToken: cancellationToken);
+
+                // Clean up by deleting the temporary file
+                File.Delete(csvFilePath);
+            }
+            catch (Exception ex)
+            {
+                // Log the error and inform the user about the issue
+                Log($"Error processing the /getallcalls command: {ex.Message}");
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\nOops, something went wrong. Please try again later.", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+            }
+            finally
+            {
+                // Ensure user is marked as not busy once the task completes
+                userState.IsBusy = false;
+            }
+        }
+        public string GenerateCsv(IEnumerable<CallHistoryWithUserNames> calls)
+        {
+            var csvFilePath = Path.Combine(Path.GetTempPath(), $"CallHistory_{DateTime.UtcNow:yyyyMMddHHmmss}.csv");
+
+            try
+            {
+                using (var writer = new StreamWriter(csvFilePath, false, Encoding.UTF8)) // Ensure UTF-8 encoding
+                using (var csv = new CsvWriter(writer, CultureInfo.InvariantCulture))
+                {
+                    // Write header row
+                    csv.WriteField("CallId");
+                    csv.WriteField("SourcePhoneNumber");
+                    csv.WriteField("DestinationPhoneNumber");
+                    csv.WriteField("CallDateTime");
+                    csv.WriteField("Duration");
+                    csv.WriteField("CallType");
+                    csv.WriteField("FileName");
+                    csv.WriteField("CallerName");
+                    csv.WriteField("ReceiverName");
+                    csv.NextRecord();
+
+                    // Write data rows
+                    foreach (var call in calls)
+                    {
+                        csv.WriteField(call.CallId);
+                        csv.WriteField(call.SourcePhoneNumber);
+                        csv.WriteField(call.DestinationPhoneNumber);
+                        csv.WriteField(call.CallDateTime);
+                        csv.WriteField(call.Duration);
+                        csv.WriteField(call.CallType);
+                        csv.WriteField(call.FileName);
+                        csv.WriteField(call.CallerName ?? string.Empty);
+                        csv.WriteField(call.ReceiverName ?? string.Empty);
+                        csv.NextRecord();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log the error for debugging or tracking
+                Log($"Error generating CSV: {ex.Message}");
+
+                // Clean up by deleting the file if it exists
+                if (File.Exists(csvFilePath))
+                {
+                    File.Delete(csvFilePath);
+                }
+
+                // Optionally, rethrow or return an empty string / null to indicate failure
+                throw new Exception("Failed to generate CSV file.", ex);
+            }
+
+            return csvFilePath;
+        }
+
 
         private Telegram.Bot.Types.ReplyMarkups.InlineKeyboardMarkup GetCommandInlineKeyboard()
         {
@@ -926,6 +1163,28 @@ namespace CustomerMonitoringApp.WPFApp
             }
         }
 
+
+        private string BuildCallSummaryMessage(IEnumerable<CallHistoryWithUserNames> calls)
+        {
+            var summaryBuilder = new StringBuilder();
+            summaryBuilder.AppendLine("📞 *Call History Summary*");
+
+            foreach (var call in calls)
+            {
+                summaryBuilder.AppendLine("──────────────────────");
+                summaryBuilder.AppendLine($"📅 *Date:* {call.CallDateTime}");
+                summaryBuilder.AppendLine($"📲 *From:* {call.SourcePhoneNumber} ({call.CallerName ?? "Unknown"})");
+                summaryBuilder.AppendLine($"📞 *To:* {call.DestinationPhoneNumber} ({call.ReceiverName ?? "Unknown"})");
+                summaryBuilder.AppendLine($"⏳ *Duration:* {call.Duration} seconds");
+                summaryBuilder.AppendLine($"📁 *File Name:* {call.FileName}");
+                summaryBuilder.AppendLine($"📈 *Call Type:* {call.CallType}");
+            }
+
+            summaryBuilder.AppendLine("──────────────────────");
+            summaryBuilder.AppendLine("_Summary end_");
+
+            return summaryBuilder.ToString();
+        }
 
 
         #region Main Conversion Method
@@ -1153,8 +1412,6 @@ namespace CustomerMonitoringApp.WPFApp
             }
         }
 
-
-
         private async Task HandleGetCallsCommand(
         string[] commandParts,
         long chatId,
@@ -1201,6 +1458,11 @@ namespace CustomerMonitoringApp.WPFApp
                 // Send the CSV file to the user
                 using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
                 await botClient.SendDocument(chatId, new InputFileStream(stream, $"getcalls_{phoneNumber}_{DateTime.UtcNow:yyyyMMddHHmmss}.csv"), cancellationToken: cancellationToken);
+
+
+                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
+                                                    "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
+                    cancellationToken: cancellationToken);
 
                 // Clean up by deleting the temporary file after sending
                 File.Delete(csvFilePath);
@@ -1480,7 +1742,7 @@ namespace CustomerMonitoringApp.WPFApp
                     int validRowCount = 0;
 
                     // Validate each data row
-                    for (int row = 2; row <= rowCount; row++)
+                    for (int row = 2; row <= 5; row++)
                     {
                         var sourcePhone = worksheet.Cells[row, 1].Text.Trim();  // Column A: "شماره مبدا"
                         var destinationPhone = worksheet.Cells[row, 2].Text.Trim(); // Column B: "شماره مقصد"
@@ -1574,23 +1836,7 @@ namespace CustomerMonitoringApp.WPFApp
 
                     // Retrieve row and column counts
                     var rowCount = worksheet.Dimension?.Rows ?? 0;
-                    var columnCount = worksheet.Dimension?.Columns ?? 0;
-
-                   
-
-                    // Expected headers for a User file
-                    var expectedHeaders = new List<string>
-            {
-                "شماره تلفن",    // Phone Number
-                "نام",           // First Name
-                "نام خانوادگی",  // Last Name
-                "نام پدر",       // Father's Name
-                "تاریخ تولد",    // Date of Birth
-                "نشانی"         // Address
-            };
-
-                  
-
+  
                     // Check if there are enough rows of data (at least 2 rows: 1 header + 1 data row)
                     if (rowCount < 2)
                     {
@@ -1598,8 +1844,8 @@ namespace CustomerMonitoringApp.WPFApp
                         return false;
                     }
 
-                    // Validate each data row
-                    for (int row = 2; row <= 5; row++)
+                    // Validate each data row (from row 2 onward)
+                    for (int row = 2; row <= 2; row++)
                     {
                         var phoneNumber = worksheet.Cells[row, 1].Text.Trim();  // Column A: "شماره تلفن"
                         var firstName = worksheet.Cells[row, 2].Text.Trim();    // Column B: "نام"
@@ -1613,17 +1859,25 @@ namespace CustomerMonitoringApp.WPFApp
                             string.IsNullOrWhiteSpace(lastName) || string.IsNullOrWhiteSpace(fatherName) ||
                             string.IsNullOrWhiteSpace(birthDate) || string.IsNullOrWhiteSpace(address))
                         {
-                            Log($"Error: Row {row} contains missing data.");
+                            // Log exactly which field is missing
+                            var missingFields = new List<string>();
+                            if (string.IsNullOrWhiteSpace(phoneNumber)) missingFields.Add("Phone Number");
+                            if (string.IsNullOrWhiteSpace(firstName)) missingFields.Add("First Name");
+                            if (string.IsNullOrWhiteSpace(lastName)) missingFields.Add("Last Name");
+                            if (string.IsNullOrWhiteSpace(fatherName)) missingFields.Add("Father's Name");
+                            if (string.IsNullOrWhiteSpace(birthDate)) missingFields.Add("Birth Date");
+                            if (string.IsNullOrWhiteSpace(address)) missingFields.Add("Address");
+
+                            Log($"Error: Row {row} contains missing data in the following field(s): {string.Join(", ", missingFields)}");
                             return false;  // Incomplete row, invalid file
                         }
 
                         // Validate the format of Phone Number (e.g., check if it starts with "98" and has the correct number of digits)
                         if (!IsValidPhoneNumber(phoneNumber))
                         {
-                         //   Log($"Error: Invalid phone number format in row {row}. Phone Number: '{phoneNumber}'");
+                            Log($"Error: Invalid phone number format in row {row}. Phone Number: '{phoneNumber}'");
                             return false; // Invalid phone number format
                         }
-                   
                     }
 
                     // If we have passed all checks, return true
@@ -2166,7 +2420,7 @@ namespace CustomerMonitoringApp.WPFApp
         {
             var usersToImport = new List<User>();
             var errors = new List<string>(); // To collect error messages
-            const int BatchSize = 100; // Define a batch size for processing
+            const int BatchSize = 1000; // Define a batch size for processing
             var processedRows = 0; // Track the number of processed rows
             var startTime = DateTime.Now; // Track the start time of the operation
 
@@ -2234,7 +2488,7 @@ namespace CustomerMonitoringApp.WPFApp
                         // Save users in batches
                         if (usersToImport.Count >= BatchSize)
                         {
-                            await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken);
+                            await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken,filePath);
                             usersToImport.Clear();
                         }
 
@@ -2249,7 +2503,7 @@ namespace CustomerMonitoringApp.WPFApp
                 // Save remaining users
                 if (usersToImport.Count > 0)
                 {
-                    await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken);
+                    await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken,filePath);
                 }
 
                 // Notify user
@@ -2286,98 +2540,65 @@ namespace CustomerMonitoringApp.WPFApp
         private List<CustomerMonitoringApp.Domain.Entities.User> _users = new List<CustomerMonitoringApp.Domain.Entities.User>();
 
 
-        private CustomerMonitoringApp.Domain.Entities.User CreateUserFromRow(ExcelWorksheet worksheet, int row, long chatId, List<string> errors)
+        public CustomerMonitoringApp.Domain.Entities.User CreateUserFromRow(
+            ExcelWorksheet worksheet,
+            int row,
+            long chatId,
+            List<string> errors)
         {
             // Retrieve and trim values from the worksheet
-            var userNumber = worksheet.Cells[row, 1].Text.Trim();
+            var userPhone = worksheet.Cells[row, 1].Text.Trim();
+            Console.WriteLine($"Row {row}: Extracted user phone = '{userPhone}'"); // Debugging output
+
             var userName = worksheet.Cells[row, 2].Text.Trim();
             var userFamily = worksheet.Cells[row, 3].Text.Trim();
             var userFatherName = worksheet.Cells[row, 4].Text.Trim();
             var userBirthDayString = worksheet.Cells[row, 5].Text.Trim();
             var userAddress = worksheet.Cells[row, 6].Text.Trim();
             var userDescription = worksheet.Cells[row, 7].Text.Trim();
-            var userSource = worksheet.Cells[row, 8].Text.Trim();
+            var userSource = worksheet.Cells[row, 9].Text.Trim();
 
-            // Set a default date for userBirthDay
-            DateTime userBirthDay = new DateTime(2000, 1, 1);
-            DateTime? parsedBirthDay = ParsePersianDate(userBirthDayString);
-            if (parsedBirthDay.HasValue)
-            {
-                userBirthDay = parsedBirthDay.Value;
-            }
-            else
-            {
-                errors.Add($"Row {row}: Empty or invalid Persian date string provided. Using default date {userBirthDay.ToShortDateString()}.");
-            }
-
-            // Retrieve all users matching the given phone number
-            var matchingUsers = FindUsersByPhoneNumber(userNumber);
-
-            if (matchingUsers.Count > 1)
-            {
-                // Log error if multiple users are found with the same phone number
-                errors.Add($"Row {row} error: More than one user with the phone number {userNumber} exists.");
-                return null;
-            }
-            else if (matchingUsers.Count == 1)
-            {
-                // Update the existing user if found
-                return UpdateExistingUser(matchingUsers[0], userName, userFamily, userFatherName, userBirthDay, userAddress, userDescription, userSource, chatId, row);
-            }
-            else
-            {
-                // Validate required fields for a new user
-                if (string.IsNullOrWhiteSpace(userNumber) || string.IsNullOrWhiteSpace(userName))
-                {
-                    errors.Add($"Row {row}: Invalid user data - UserNumber or UserName is empty.");
-                    return null;
-                }
-
-                // Create and add a new user if no match is found
-                return CreateNewUser(userNumber, userName, userFamily, userFatherName, userBirthDay, userAddress, userDescription, userSource, chatId, row);
-            }
+            // Create and return the user with default values as necessary
+            return CreateNewUserFromRow(
+                userPhone,
+                userName,
+                userFamily,
+                userFatherName,
+                userBirthDayString,
+                userAddress,
+                userDescription,
+                userSource,
+                chatId,row);
         }
 
-        // Helper method to update an existing user
-        private CustomerMonitoringApp.Domain.Entities.User UpdateExistingUser(
-            CustomerMonitoringApp.Domain.Entities.User existingUser,
-            string userName, string userFamily, string userFatherName, DateTime userBirthDay,
-            string userAddress, string userDescription, string userSource, long chatId, int row)
-        {
-            existingUser.UserNameFile = userName;
-            existingUser.UserFamilyFile = userFamily;
-            existingUser.UserFatherNameFile = userFatherName;
-            existingUser.UserBirthDayFile = userBirthDay;
-            existingUser.UserAddressFile = userAddress;
-            existingUser.UserDescriptionFile = userDescription;
-            existingUser.UserSourceFile = userSource;
-            existingUser.UserTelegramID = (int)chatId;
 
-            Log($"Updated user with UserNumber: {existingUser.UserNumberFile} in row {row}.");
-            return existingUser;
-        }
-
-        // Helper method to create a new user
-        private CustomerMonitoringApp.Domain.Entities.User CreateNewUser(
-            string userNumber, string userName, string userFamily, string userFatherName, DateTime userBirthDay,
-            string userAddress, string userDescription, string userSource, long chatId, int row)
+        public CustomerMonitoringApp.Domain.Entities.User CreateNewUserFromRow(
+            string userPhone,
+            string userName,
+            string userFamily,
+            string userFatherName,
+            string userBirthDay,
+            string userAddress,
+            string userDescription,
+            string userSource,
+            long chatId,
+            int row)
         {
-            var newUser = new CustomerMonitoringApp.Domain.Entities.User
+            // Log to verify values being passed
+            Console.WriteLine($"Row {row}: Creating user with phone '{userPhone}'");
+
+            return new CustomerMonitoringApp.Domain.Entities.User
             {
-                UserNumberFile = userNumber,
-                UserNameFile = userName,
-                UserFamilyFile = userFamily,
-                UserFatherNameFile = userFatherName,
-                UserBirthDayFile = userBirthDay,
-                UserAddressFile = userAddress,
-                UserDescriptionFile = userDescription,
-                UserSourceFile = userSource,
-                UserTelegramID = (int)chatId
+                UserNumberFile = !string.IsNullOrEmpty(userPhone) ? userPhone : "NoPhone",
+                UserNameFile = !string.IsNullOrEmpty(userName) ? userName : "NoName",
+                UserFamilyFile = !string.IsNullOrEmpty(userFamily) ? userFamily : "NoFamily",
+                UserFatherNameFile = !string.IsNullOrEmpty(userFatherName) ? userFatherName : "NoFatherName",
+                UserBirthDayFile = !string.IsNullOrEmpty(userBirthDay) ? userBirthDay : "NoBirthDay",
+                UserAddressFile = !string.IsNullOrEmpty(userAddress) ? userAddress : "NoAddress",
+                UserDescriptionFile = !string.IsNullOrEmpty(userDescription) ? userDescription : "NoDescription",
+                UserSourceFile = !string.IsNullOrEmpty(userSource) ? userSource : "NoSource",
+                UserTelegramID = chatId
             };
-
-            _users.Add(newUser);
-            Log($"Created new user from row {row}: UserNumber: {userNumber}, UserName: {userName}.");
-            return newUser;
         }
 
 
@@ -2388,7 +2609,7 @@ namespace CustomerMonitoringApp.WPFApp
             phoneNumber = NormalizePhoneNumber(phoneNumber);
 
             // Log the search operation
-            Log($"Searching for user with PhoneNumber: {phoneNumber}.");
+         //   Log($"Searching for user with PhoneNumber: {phoneNumber}.");
 
             // Return all users with the matching phone number
             return _users.Where(u => u.UserNumberFile == phoneNumber).ToList();
@@ -2639,13 +2860,16 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
         // Summary: This method imports a list of users into a SQL Server database, ensuring high performance with batch inserts and resilience using Polly.
-        //          It incorporates enhanced stability measures, better error handling, and user notifications through a Telegram bot.
-        //
-        // Regions:
-        // 1. Database context setup and Polly policy configuration
-        // 2. Main logic for batch processing and data insertion with transaction handling and optimization
-        // 3. Error handling, notifications, and performance logging
-        private async Task SaveUsersToDatabase(List<CustomerMonitoringApp.Domain.Entities.User> usersToImport, ITelegramBotClient botClient, long chatId, CancellationToken cancellationToken)
+        //        
+        /// <summary>
+        /// It incorporates enhanced stability measures, better error handling, and user notifications through a Telegram bot.
+        /// </summary>
+        /// <param name="usersToImport"></param>
+        /// <param name="botClient"></param>
+        /// <param name="chatId"></param>
+        /// <param name="cancellationToken"></param>
+        /// <returns></returns>
+        private async Task SaveUsersToDatabase(List<CustomerMonitoringApp.Domain.Entities.User> usersToImport, ITelegramBotClient botClient, long chatId, CancellationToken cancellationToken,string path)
         {
             string connectionString = ConfigurationManager.ConnectionStrings["DefaultConnection"].ConnectionString;
 
@@ -2672,7 +2896,7 @@ namespace CustomerMonitoringApp.WPFApp
             stopwatch.Start();
 
             // Region 2: Main logic for batch processing and data insertion with transaction handling and optimization
-            int batchSize = 5000; // Adjust batch size for optimized memory usage and performance
+            int batchSize = 1000; // Adjust batch size for optimized memory usage and performance
             using var dbContext = new AppDbContext(options);
             using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
 
@@ -2690,7 +2914,7 @@ namespace CustomerMonitoringApp.WPFApp
                         var batch = validUsers.Skip(i).Take(batchSize).ToList();
 
                         // Use SqlBulkCopy for higher efficiency
-                        await BulkInsertUsersAsync(batch, connectionString, cancellationToken);
+                        await BulkInsertUsersAsync(batch, connectionString, cancellationToken,path);
 
                         Log($"Batch of {batch.Count} users imported successfully in {stopwatch.ElapsedMilliseconds} ms.");
                     }
@@ -2721,12 +2945,10 @@ namespace CustomerMonitoringApp.WPFApp
 
         private bool IsValidUser(CustomerMonitoringApp.Domain.Entities.User user)
         {
-            // Implement your validation logic here
-            return !string.IsNullOrEmpty(user.UserSourceFile) && !string.IsNullOrEmpty(user.UserAddressFile);
+            return true;
         }
 
-
-        private async Task BulkInsertUsersAsync(List<CustomerMonitoringApp.Domain.Entities.User> users, string connectionString, CancellationToken cancellationToken)
+        private async Task BulkInsertUsersAsync(List<CustomerMonitoringApp.Domain.Entities.User> users, string connectionString, CancellationToken cancellationToken,string path)
         {
             using var bulkCopy = new SqlBulkCopy(connectionString);
             using var dataTable = new DataTable();
@@ -2736,31 +2958,70 @@ namespace CustomerMonitoringApp.WPFApp
             dataTable.Columns.Add("UserNameFile", typeof(string));
             dataTable.Columns.Add("UserFamilyFile", typeof(string));
             dataTable.Columns.Add("UserFatherNameFile", typeof(string));
-            dataTable.Columns.Add("UserBirthDayFile", typeof(DateTime));
+            dataTable.Columns.Add("UserBirthDayFile", typeof(string));
             dataTable.Columns.Add("UserAddressFile", typeof(string));
             dataTable.Columns.Add("UserDescriptionFile", typeof(string));
             dataTable.Columns.Add("UserSourceFile", typeof(string));
             dataTable.Columns.Add("UserTelegramID", typeof(long));
-            // Add other columns as needed
 
             foreach (var user in users)
             {
+
+                
+                // Apply logic to clean UserNumberFile
+                var cleanedUserNumberFile = user.UserNumberFile;
+
+                if (!string.IsNullOrEmpty(cleanedUserNumberFile))
+                {
+                    // If it starts with 98, remove the prefix and add 0 at the beginning
+                    if (cleanedUserNumberFile.StartsWith("98"))
+                    {
+                        cleanedUserNumberFile = "0" + cleanedUserNumberFile.Substring(2);
+                    }
+                    // If it starts with 09, ensure it stays as 09
+                    else if (!cleanedUserNumberFile.StartsWith("09"))
+                    {
+                        // If the number doesn't start with 0 or 09, add 0 at the beginning
+                        cleanedUserNumberFile = "0" + cleanedUserNumberFile;
+                    }
+                }
+
+                // Add rows to the DataTable
                 dataTable.Rows.Add(
-                    user.UserNumberFile,
-                    user.UserNameFile,
-                    user.UserFamilyFile,
-                    user.UserFatherNameFile,
-                    user.UserBirthDayFile,
-                    user.UserAddressFile,
-                    user.UserDescriptionFile,
-                    user.UserSourceFile,
-                    user.UserTelegramID
-                    /*, other fields */
+                        cleanedUserNumberFile ?? string.Empty,
+                        user.UserNameFile ?? string.Empty,
+                        user.UserFamilyFile ?? string.Empty,
+                        user.UserFatherNameFile ?? string.Empty,
+                        user.UserBirthDayFile ?? string.Empty,
+                        user.UserAddressFile?.Substring(0, Math.Min(user.UserAddressFile.Length, 50)) ?? string.Empty, // Truncate if longer than 50
+                        user.UserDescriptionFile ?? string.Empty,
+                        user.UserSourceFile == path,
+                        user.UserTelegramID ?? 0L
                 );
             }
 
+            // Ensure the mappings are set
             bulkCopy.DestinationTableName = "Users";
-            await bulkCopy.WriteToServerAsync(dataTable, cancellationToken);
+            bulkCopy.ColumnMappings.Add("UserNumberFile", "UserNumberFile");
+            bulkCopy.ColumnMappings.Add("UserNameFile", "UserNameFile");
+            bulkCopy.ColumnMappings.Add("UserFamilyFile", "UserFamilyFile");
+            bulkCopy.ColumnMappings.Add("UserFatherNameFile", "UserFatherNameFile");
+            bulkCopy.ColumnMappings.Add("UserBirthDayFile", "UserBirthDayFile");
+            bulkCopy.ColumnMappings.Add("UserAddressFile", "UserAddressFile");
+            bulkCopy.ColumnMappings.Add("UserDescriptionFile", "UserDescriptionFile");
+            bulkCopy.ColumnMappings.Add("UserSourceFile", "UserSourceFile");
+            bulkCopy.ColumnMappings.Add("UserTelegramID", "UserTelegramID");
+
+            try
+            {
+                // Perform the bulk insert operation
+                await bulkCopy.WriteToServerAsync(dataTable, cancellationToken);
+              //  Log("Bulk insert completed successfully.");
+            }
+            catch (Exception ex)
+            {
+              //  Log($"Error during bulk insert: {ex.Message}");
+            }
         }
 
 

@@ -10,13 +10,12 @@ using Microsoft.Extensions.Logging;
 using System.Globalization;
 using Microsoft.Data.SqlClient;
 using System.Data;
-using EFCore.BulkExtensions;
 using System.Threading.Tasks.Dataflow;
+using CustomerMonitoringApp.Domain.Views;
 using Microsoft.EntityFrameworkCore.Storage;
-using FastMember;
 using Polly;
-using MediatR; // For handling as a MediatR command
 using Serilog;
+using Hangfire;
 
 namespace CustomerMonitoringApp.Infrastructure.Repositories
 {
@@ -24,9 +23,11 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
     {
         private readonly AppDbContext _context;
         private readonly ILogger<CallHistoryRepository> _logger;
+        private readonly IBackgroundJobClient _backgroundJobClient; // Hangfire background job client
 
-        public CallHistoryRepository(AppDbContext context , ILogger<CallHistoryRepository> logger)
+        public CallHistoryRepository(AppDbContext context , ILogger<CallHistoryRepository> logger , IBackgroundJobClient backgroundJobClient)
         {
+            _backgroundJobClient = backgroundJobClient;
             _context = context;
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
@@ -119,7 +120,7 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                 transaction?.Dispose();
             }
         }
-
+      
         public async Task<List<CallHistory>> GetRecentCallsByPhoneNumberAsync(string phoneNumber, string startDate, string endDateTime)
         {
             try
@@ -146,123 +147,126 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
             }
         }
 
+
+        /// <summary>
+        /// Saves bulk data to the database using SqlBulkCopy, executed as a Hangfire background job.
+        /// </summary>
         public async Task SaveBulkDataAsync(DataTable dataTable)
         {
             string connectionString = "Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True";
-            const int bulkCopyTimeout = 120; // Increased timeout for large data
-            const int maxRetryAttempts = 3; // Max retry attempts for Polly
-            const int baseDelayBetweenRetries = 2000; // Base delay between retries in ms
-            const int optimalBatchSize = 9000; // Optimal batch size for bulk copy
-            const int maxConcurrentThreads = 3; // Max concurrent threads for parallel processing
-
-            // Retry policy with exponential backoff using Polly
-            var retryPolicy = Policy
-                .Handle<Exception>()
-                .WaitAndRetryAsync(
-                    maxRetryAttempts,
-                    attempt => TimeSpan.FromMilliseconds(baseDelayBetweenRetries * Math.Pow(2, attempt - 1)),
-                    (exception, timespan, retryAttempt, context) =>
-                    {
-                        _logger.LogWarning($"Retry {retryAttempt} encountered an error: {exception.Message}. Waiting {timespan.TotalSeconds} seconds before retry.");
-                    });
+            const int batchSize = 1000; // تنظیم اندازه دسته
+            const int bulkCopyTimeout = 300; // تایم‌اوت بیشتر برای درج داده‌های حجیم
 
             try
             {
-                // Retry logic to handle transient failures
-                await retryPolicy.ExecuteAsync(async () =>
+                using (var connection = new SqlConnection(connectionString))
                 {
-                    using (var connection = new SqlConnection(connectionString))
+                    await connection.OpenAsync();
+                    using (var transaction = connection.BeginTransaction())
                     {
-                        await connection.OpenAsync();
-
-                        // Start a transaction to ensure atomicity
-                        using (var transaction = await connection.BeginTransactionAsync())
+                        using (var sqlBulkCopy = new SqlBulkCopy(connection, SqlBulkCopyOptions.TableLock, transaction))
                         {
-                            try
+                            sqlBulkCopy.DestinationTableName = "CallHistories";
+                            sqlBulkCopy.BatchSize = batchSize;
+                            sqlBulkCopy.EnableStreaming = true;
+                            sqlBulkCopy.BulkCopyTimeout = bulkCopyTimeout;
+
+                            // نقشه‌برداری ستون‌های DataTable به ستون‌های SQL
+                            foreach (DataColumn column in dataTable.Columns)
                             {
-                                // Split data into chunks based on optimal batch size
-                                var totalRows = dataTable.Rows.Count;
-                                var numberOfBatches = (int)Math.Ceiling((double)totalRows / optimalBatchSize);
+                                sqlBulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
+                            }
 
-                                var tasks = new List<Task>();
+                            // برای بهینه‌سازی استفاده از CPU، از Parallel استفاده می‌کنیم
+                            var totalRows = dataTable.Rows.Count;
+                            var batches = Enumerable.Range(0, (int)Math.Ceiling((double)totalRows / batchSize))
+                                .Select(i => dataTable.AsEnumerable().Skip(i * batchSize).Take(batchSize).CopyToDataTable())
+                                .ToList();
 
-                                for (int batchIndex = 0; batchIndex < numberOfBatches; batchIndex++)
+                            // پردازش موازی دسته‌ها
+                            await Task.WhenAll(batches.Select(async batchTable =>
+                            {
+                                try
                                 {
-                                    // Split the DataTable into smaller chunks
-                                    var batchStartIndex = batchIndex * optimalBatchSize;
-                                    var batchEndIndex = Math.Min(batchStartIndex + optimalBatchSize, totalRows);
-
-                                    var batch = dataTable.Clone();
-                                    for (int rowIndex = batchStartIndex; rowIndex < batchEndIndex; rowIndex++)
-                                    {
-                                        batch.ImportRow(dataTable.Rows[rowIndex]);
-                                    }
-
-                                    // Process each batch in parallel (up to `maxConcurrentThreads`)
-                                    if (tasks.Count >= maxConcurrentThreads)
-                                    {
-                                        await Task.WhenAny(tasks); // Wait for at least one task to finish before continuing
-                                        tasks.RemoveAll(t => t.IsCompleted);
-                                    }
-
-                                    tasks.Add(Task.Run(async () =>
-                                    {
-                                        using (var reader = ObjectReader.Create(batch.AsEnumerable(), batch.Columns.Cast<DataColumn>().Select(c => c.ColumnName).ToArray()))
-                                        using (var sqlBulkCopy = new SqlBulkCopy(connection, Microsoft.Data.SqlClient.SqlBulkCopyOptions.TableLock, (SqlTransaction)transaction))
-                                        {
-                                            sqlBulkCopy.DestinationTableName = "CallHistories"; // Target table name
-                                            sqlBulkCopy.EnableStreaming = true; // Enable streaming for large data
-                                            sqlBulkCopy.BulkCopyTimeout = bulkCopyTimeout; // Timeout for the bulk copy operation
-                                            sqlBulkCopy.BatchSize = optimalBatchSize; // Set optimal batch size for each batch
-                   
-
-                                            // Map columns between DataTable and SQL table
-                                            foreach (DataColumn column in batch.Columns)
-                                            {
-                                                sqlBulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
-                                            }
-
-                                            try
-                                            {
-                                                // Perform the bulk insert for this batch
-                                                await sqlBulkCopy.WriteToServerAsync(reader);
-                                                _logger.LogInformation($"Successfully inserted {batch.Rows.Count} rows.");
-                                            }
-                                            catch (Exception batchEx)
-                                            {
-                                                _logger.LogError(batchEx, "Error during batch insertion. Collecting failed rows.");
-                                                HandleFailedRows(batch, sqlBulkCopy); // Implement custom logic for failed rows
-                                            }
-                                        }
-                                    }));
+                                    await sqlBulkCopy.WriteToServerAsync(batchTable);
+                                    _logger.LogInformation($"Successfully inserted batch with {batchTable.Rows.Count} rows.");
                                 }
+                                catch (Exception batchEx)
+                                {
+                                    _logger.LogError(batchEx, "Error during batch insertion. Collecting failed rows.");
 
-                                // Ensure all parallel tasks are completed
-                                await Task.WhenAll(tasks);
+                                    // ثبت خطا برای ردیف‌های ناموفق
+                                    foreach (DataRow row in batchTable.Rows)
+                                    {
+                                        try
+                                        {
+                                            var singleRowTable = batchTable.Clone();
+                                            singleRowTable.ImportRow(row);
+                                            await sqlBulkCopy.WriteToServerAsync(singleRowTable);
+                                        }
+                                        catch (Exception rowEx)
+                                        {
+                                            _logger.LogError(rowEx, "Failed to insert row: {RowData}", row.ItemArray);
+                                        }
+                                    }
+                                }
+                            }));
 
-                                // Commit transaction after successful insertion of all batches
-                                await transaction.CommitAsync();
-                                _logger.LogInformation("Bulk data saved successfully to the database.");
-                            }
-                            catch (Exception ex)
-                            {
-                                // Rollback the transaction if any error occurs
-                                await transaction.RollbackAsync();
-                                _logger.LogError($"Error during bulk operation: {ex.Message}. Transaction rolled back.");
-                                throw;
-                            }
+                            // اگر همه دسته‌ها با موفقیت درج شد، commit کنیم
+                            transaction.Commit();
+                            _logger.LogInformation("Bulk data saved successfully to the database.");
                         }
                     }
-                });
+                }
             }
             catch (Exception ex)
             {
-                // Log and throw critical errors that occur during the bulk operation
-                _logger.LogError($"Critical error during bulk data save: {ex.Message}. Operation aborted.");
-                throw;
+                _logger.LogError($"Critical error during SqlBulkCopy operation: {ex.Message}. Operation aborted.");
+                throw; // برای مدیریت خطا توسط لایه سرویس مجدد پرتاب شود
+            }
+        }
+        // This method returns the user from the background job
+        public async Task<User> GetUserDetailsByPhoneNumberAsync(string phoneNumber)
+        {
+            // First, try to fetch the user directly from the database
+            var user = await _context.Users
+                .Where(u => u.UserNumberFile == phoneNumber)
+                .FirstOrDefaultAsync();
+
+            if (user != null)
+            {
+                // If user is found, log or process further in the background if needed
+                _backgroundJobClient.Enqueue(() => ProcessUserDetailsAsync(phoneNumber));
+
+                // Return the user immediately
+                return user;
+            }
+            else
+            {
+                // If user is not found, handle the case accordingly
+                _logger.LogError("User not found.");
+                return null;
             }
         }
 
+        // This method is still executed as a background job for additional processing
+        public async Task ProcessUserDetailsAsync(string phoneNumber)
+        {
+            var user = await _context.Users
+                .Where(u => u.UserNumberFile == phoneNumber)
+                .FirstOrDefaultAsync();
+
+            if (user != null)
+            {
+                _logger.LogError($"User Found: {user.UserNumberFile}");
+                // Additional logic like sending a notification or logging can go here
+            }
+            else
+            {
+                _logger.LogError("User not found.");
+                // Handle the case when no user is found
+            }
+        }
 
         /// <summary>
         /// Handles rows that failed during bulk insert, attempting to insert them individually.
@@ -341,13 +345,29 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
 
         /// <summary>
         /// Retrieves selected call history fields for a specific phone number, excluding sensitive data by returning a DTO.
+        /// This is now executed as a background job using Hangfire.
         /// </summary>
-        public async Task<List<CallHistory>> GetCallsByPhoneNumberAsync(string phoneNumber)
+        public Task<List<CallHistory>> GetCallsByPhoneNumberAsync(string phoneNumber)
+        {
+            // Enqueue the background job for processing the call history retrieval
+            _backgroundJobClient.Enqueue(() => ProcessGetCallsByPhoneNumberAsync(phoneNumber));
+
+            // Return an empty list (or handle it as needed) since the actual job runs in the background.
+            // If you want to return something, consider adding an alternative mechanism, such as a callback, for returning the result.
+            return Task.FromResult(new List<CallHistory>());
+        }
+
+        /// <summary>
+        /// Process the call history retrieval in the background job.
+        /// This method is called by Hangfire.
+        /// </summary>
+        public async Task ProcessGetCallsByPhoneNumberAsync(string phoneNumber)
         {
             var result = new List<CallHistory>();
 
             try
             {
+                // Fetch the call history for the given phone number from the database
                 result = await _context.CallHistories
                     .Where(ch => ch.SourcePhoneNumber == phoneNumber || ch.DestinationPhoneNumber == phoneNumber)
                     .Select(ch => new CallHistory // Map only specific properties
@@ -360,17 +380,21 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                         FileName = ch.FileName
                     })
                     .ToListAsync();
+
+                // Optionally, log the result or handle it as needed
+                _logger.LogInformation($"Successfully fetched call history for phone number: {phoneNumber}. Total records: {result.Count}");
+
+                // You can process the result further here, such as storing it in a file or sending it to a message queue
             }
             catch (Exception ex)
             {
+                // Log any errors that occur during the call history retrieval process
                 _logger.LogError(ex, "Error occurred while fetching call history for phone number: {PhoneNumber}", phoneNumber);
             }
-
-            return result;
         }
 
 
-   
+
         /// <summary>
         /// Retrieves long calls for a specific phone number that exceed a specified duration.
         /// </summary>
@@ -404,6 +428,8 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
 
         }
 
+
+
         /// <summary>
         /// Retrieves the top N most recent calls for a phone number.
         /// </summary>
@@ -415,6 +441,10 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                 .Take(numberOfCalls)
                 .ToListAsync();
         }
+
+
+
+
 
         /// <summary>
         /// Checks if a phone number has been contacted within a specified time window.
@@ -428,7 +458,6 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
 
         public async Task DeleteAllCallHistoriesAsync()
         {
-            const int batchSize = 80000;
             const int maxRetryAttempts = 5;
             const int baseDelayBetweenRetries = 2000;
 
@@ -442,59 +471,37 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                         Log.Warning($"Retry {retryAttempt} after error: {exception.Message}. Waiting {timespan.TotalSeconds} seconds before retry.");
                     });
 
-            var totalRecordsToDelete = await _context.CallHistories.CountAsync();
-            if (totalRecordsToDelete == 0)
-            {
-                Log.Information("No records to delete.");
-                return;
-            }
-
-            int deletedRecords = 0;
-
+            // Execute the SQL commands within a transaction
             using (var transaction = await _context.Database.BeginTransactionAsync())
             {
                 try
                 {
-                    while (deletedRecords < totalRecordsToDelete)
+                    await retryPolicy.ExecuteAsync(async () =>
                     {
-                        await retryPolicy.ExecuteAsync(async () =>
-                        {
-                            var batch = await _context.CallHistories
-                                .OrderBy(ch => ch.CallId)
-                                .Take(batchSize)
-                                .ToListAsync();
+                        // SQL command to truncate all records from the CallHistories table
+                        string truncateSql = "TRUNCATE TABLE CallHistories;";
+                        await _context.Database.ExecuteSqlRawAsync(truncateSql);
 
-                            if (!batch.Any())
-                            {
-                                Log.Information("No more records found for deletion.");
-                                return;
-                            }
-
-                            // Delete the batch using EFCore.BulkExtensions
-                            await _context.BulkDeleteAsync(batch);
-                            deletedRecords += batch.Count;
-
-                            Log.Information($"Deleted {deletedRecords} records so far.");
-                        });
-                    }
+                        Log.Information("All records truncated and table reset successfully.");
+                    });
 
                     await transaction.CommitAsync();
-                    Log.Information($"Successfully deleted {deletedRecords} call history records.");
                 }
                 catch (Exception ex)
                 {
                     await transaction.RollbackAsync();
-                    Log.Error($"Failed to delete records. Transaction rolled back due to error: {ex.Message}");
+                    Log.Error($"Failed to truncate records. Transaction rolled back due to error: {ex.Message}");
                     throw;
                 }
             }
         }
 
+
         public async Task DeleteCallHistoriesByFileNameAsync(string fileName)
         {
-            const int batchSize = 80000; // Size of each batch for deletion (adjust as needed)
+            const int batchSize = 500; // Size of each batch for deletion (adjust as needed)
             const int maxRetryAttempts = 5; // Max number of retries before giving up
-            const int delayBetweenRetries = 2000; // Delay in milliseconds between retries (e.g., 2 seconds)
+            const int delayBetweenRetries = 1000; // Delay in milliseconds between retries (e.g., 2 seconds)
 
             // Validate input fileName
             if (string.IsNullOrEmpty(fileName))
@@ -520,20 +527,25 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
             {
                 try
                 {
-                    var batch = await _context.CallHistories
-                        .Where(ch => ch.FileName == fileName) // Filter based on file name
-                        .OrderBy(ch => ch.CallId) // Assuming there's a primary key column "CallId"
-                        .Take(batchSize)
-                        .ToListAsync();
+                    // SQL command to delete records in batches
+                    string sqlCommand = @"
+                DELETE FROM CallHistories
+                WHERE FileName = {0}
+                AND CallId IN (
+                    SELECT TOP(@batchSize) CallId
+                    FROM CallHistories
+                    WHERE FileName = {0}
+                    ORDER BY CallId
+                )";
 
-                    if (batch.Any())
+                    // Execute SQL to delete the batch of records
+                    var batchDeleted = await _context.Database.ExecuteSqlRawAsync(sqlCommand, fileName, batchSize);
+
+                    if (batchDeleted > 0)
                     {
-                        _context.CallHistories.RemoveRange(batch);
-                        await _context.SaveChangesAsync();
+                        deletedRecords += batchDeleted;
 
-                        deletedRecords += batch.Count;
-
-                        // Log the progress of deletion (e.g., every 80k rows)
+                        // Log the progress of deletion
                         _logger.LogInformation($"Deleted {deletedRecords} records for file name '{fileName}' so far.");
                     }
 
@@ -559,6 +571,66 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
             }
 
             _logger.LogInformation($"Successfully deleted {deletedRecords} call history records for file name '{fileName}'.");
+        }
+
+        public async Task<List<CallHistoryWithUserNames>> GetCallsWithUserNamesAsync(string phoneNumber)
+        {
+            // Enqueue a background job to process calls
+            var jobId = _backgroundJobClient.Enqueue(() => ProcessCallsWithUserNamesAsync(phoneNumber));
+
+            // Return an empty list or some indication that the job is enqueued
+            return new List<CallHistoryWithUserNames>();  // You can replace this with any placeholder logic
+        }
+
+        // Background job to process calls
+        public async Task ProcessCallsWithUserNamesAsync(string phoneNumber)
+        {
+            try
+            {
+                // Execute the query to retrieve calls and users
+                var queryResults = await (
+                    from call in _context.CallHistories
+                    join caller in _context.Users on call.SourcePhoneNumber equals caller.UserNumberFile into callerInfo
+                    from callerData in callerInfo.DefaultIfEmpty()
+                    join receiver in _context.Users on call.DestinationPhoneNumber equals receiver.UserNumberFile into receiverInfo
+                    from receiverData in receiverInfo.DefaultIfEmpty()
+                    where call.SourcePhoneNumber == phoneNumber || call.DestinationPhoneNumber == phoneNumber
+                    select new
+                    {
+                        CallId = call.CallId,
+                        SourcePhoneNumber = call.SourcePhoneNumber,
+                        DestinationPhoneNumber = call.DestinationPhoneNumber,
+                        CallDateTime = call.CallDateTime,
+                        Duration = call.Duration,
+                        CallType = call.CallType,
+                        FileName = call.FileName,
+                        CallerName = callerData != null ? callerData.UserNameFile : string.Empty,
+                        ReceiverName = receiverData != null ? receiverData.UserFamilyFile : string.Empty
+                    }).ToListAsync();
+
+                // Map to CallHistoryWithUserNames object
+                var results = queryResults.Select(result => new CallHistoryWithUserNames
+                {
+                    CallId = result.CallId,
+                    SourcePhoneNumber = result.SourcePhoneNumber,
+                    DestinationPhoneNumber = result.DestinationPhoneNumber,
+                    CallDateTime = result.CallDateTime,
+                    Duration = result.Duration,
+                    CallType = result.CallType,
+                    FileName = result.FileName,
+                    CallerName = result.CallerName,
+                    ReceiverName = result.ReceiverName
+                }).ToList();
+
+                // Log or process the results, e.g., send the results to the user or store them
+                Console.WriteLine($"Processed {results.Count} calls for phone number: {phoneNumber}");
+
+                // Further logic can be implemented here to handle the results (e.g., notification, storage)
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in ProcessCallsWithUserNamesAsync: {ex.Message}");
+            }
         }
 
         #endregion

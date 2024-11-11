@@ -1,12 +1,15 @@
 ﻿using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
 
 namespace CustomerMonitoringApp.Domain.Entities
 {
     /// <summary>
     /// Represents a call record between two phone numbers.
     /// </summary>
+    [Index(nameof(SourcePhoneNumber))] // Index to optimize caller phone lookups
+    [Index(nameof(DestinationPhoneNumber))] // Index to optimize receiver phone lookups
     public class CallHistory
     {
         /// <summary>
@@ -27,9 +30,9 @@ namespace CustomerMonitoringApp.Domain.Entities
         [StringLength(50)]
         public string DestinationPhoneNumber { get; set; } = string.Empty;
 
-        /// <summary>
-        /// The date and time the call occurred.
-        /// </summary>
+     
+        
+        [StringLength(50)]
         public string CallDateTime { get; set; }
 
         /// <summary>
@@ -43,17 +46,10 @@ namespace CustomerMonitoringApp.Domain.Entities
         [StringLength(50)]
         public string CallType { get; set; } = string.Empty;
 
-
+        [StringLength(50)]
         // New Field to store the File Name
         public string FileName { get; set; }  // This is the new field
 
-        // Navigation properties for associated users (caller and recipient)
-        public int? CallerUserId { get; set; }
 
-        public virtual User CallerUser { get; set; }
-
-        public int? RecipientUserId { get; set; }
-
-        public virtual User RecipientUser { get; set; }
     }
 }

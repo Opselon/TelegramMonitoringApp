@@ -8,8 +8,13 @@ namespace CustomerMonitoringApp.Application.Interfaces
     {
         Task<User> GetUserByTelegramIdAsync(long telegramId);
         Task<IEnumerable<User>> GetAllUsersAsync();
+
         Task AddUserAsync(User user);
+
         Task UpdateUserAsync(User user);
+
         Task DeleteUserAsync(int userId);
+
+        Task<User> GetUserByPhoneNumberAsync(string phoneNumber);
     }
 }

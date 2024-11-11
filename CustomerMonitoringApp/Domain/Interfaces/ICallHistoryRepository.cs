@@ -1,4 +1,5 @@
 ﻿using CustomerMonitoringApp.Domain.Entities;
+using CustomerMonitoringApp.Domain.Views;
 using Microsoft.EntityFrameworkCore.Storage;
 using System;
 using System.Collections.Generic;
@@ -39,6 +40,8 @@ namespace CustomerMonitoringApp.Domain.Interfaces
         Task<IDbContextTransaction> BeginTransactionAsync(); // Start a transaction
         Task CommitTransactionAsync(IDbContextTransaction transaction); // Commit the transaction
         Task RollbackTransactionAsync(IDbContextTransaction transaction); // Rollback if needed
+        Task<List<CallHistoryWithUserNames>> GetCallsWithUserNamesAsync(string phoneNumber);
 
+        Task<User> GetUserDetailsByPhoneNumberAsync(string phoneNumber);
     }
 }

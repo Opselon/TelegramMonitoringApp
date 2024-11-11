@@ -23,7 +23,7 @@ namespace CustomerMonitoringApp.Infrastructure.Services
                     UserNameFile = row.Cell(3).GetString(),
                     UserFamilyFile = row.Cell(4).GetString(),
                     UserFatherNameFile = row.Cell(5).GetString(),
-                    UserBirthDayFile = DateTime.Parse(row.Cell(6).GetString()),
+                    UserBirthDayFile = row.Cell(6).GetString(),
                     UserAddressFile = row.Cell(7).GetString(),
                     UserDescriptionFile = row.Cell(8).GetString(),
                     UserSourceFile = row.Cell(9).GetString(),

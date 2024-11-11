@@ -117,7 +117,7 @@
                     <!-- ScrollViewer to display log content -->
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Height="200">
                         <RichTextBox x:Name="LogTextBox" Background="White" Foreground="Black" FontSize="14" IsReadOnly="True"
-                             BorderThickness="0" Padding="10" VerticalScrollBarVisibility="Visible" 
+                             BorderThickness="0" VerticalScrollBarVisibility="Visible" 
                              AcceptsReturn="True" FontFamily="Bookman Old Style"/>
                     </ScrollViewer>
 

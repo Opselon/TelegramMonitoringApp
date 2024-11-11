@@ -7,96 +7,81 @@ using Microsoft.EntityFrameworkCore;
 namespace CustomerMonitoringApp.Domain.Entities
 {
     /// <summary>
-    /// Represents a user in the customer monitoring application. This entity stores
-    /// personal user information along with a collection of permissions related to the user.
+    /// Represents a user in the customer monitoring application, storing personal information 
+    /// along with collections for permissions and call history related to the user.
     /// </summary>
-    [Index(nameof(UserTelegramID), IsUnique = true)] // Creates a unique index on UserTelegramID
+    [Index(nameof(UserNumberFile))] // Index to optimize search on user phone numbers
     public class User
     {
+        #region Properties
+
         /// <summary>
-        /// Primary key for the User entity. This unique identifier is automatically generated.
+        /// Primary key for the User entity, uniquely identifies each user in the database.
         /// </summary>
         [Key]
         public int UserId { get; set; }
 
         /// <summary>
-        /// The username as displayed in the user's profile. This field is required and
-        /// has a maximum length of 100 characters.
+        /// Username as displayed in the user's profile. Required, max length 100 characters.
         /// </summary>
-        [Required]
+
         [StringLength(100)]
-        public string UserNameProfile { get; set; } = string.Empty;
+        public string? UserNameProfile { get; set; } = string.Empty;
 
         /// <summary>
-        /// The unique number associated with the user's file. This is an optional field
-        /// with a maximum length of 50 characters.
+        /// Unique number associated with the user's file. Optional, max length 50 characters.
         /// </summary>
         [StringLength(50)]
-        public string UserNumberFile { get; set; } = string.Empty;
+        public string? UserNumberFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// The first name of the user as recorded in their file. This is a required field
-        /// with a maximum length of 50 characters.
+        /// First name of the user as recorded in their file. Required, max length 50 characters.
         /// </summary>
-        [Required]
-        [StringLength(50)]
-        public string UserNameFile { get; set; } = string.Empty;
+
+        [StringLength(120)]
+        public string? UserNameFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// The family name of the user as recorded in their file. This is a required field
-        /// with a maximum length of 50 characters.
+        /// Family name of the user as recorded in their file. Required, max length 50 characters.
         /// </summary>
-        [Required]
-        [StringLength(50)]
-        public string UserFamilyFile { get; set; } = string.Empty;
+
+        [StringLength(150)] // Adjust based on the maximum expected length
+        public string? UserFamilyFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// The father's name of the user as recorded in their file. This is an optional field
-        /// with a maximum length of 50 characters.
-        /// </summary>
-        [StringLength(50)]
-        public string UserFatherNameFile { get; set; } = string.Empty;
-
-        /// <summary>
-        /// The birth date of the user. This is an optional field, formatted as a date.
-        /// </summary>
-        [DataType(DataType.Date)]
-        public DateTime? UserBirthDayFile { get; set; }
-
-        /// <summary>
-        /// The address of the user as recorded in their file. This is an optional field
-        /// with a maximum length of 200 characters.
-        /// </summary>
-        [StringLength(200)]
-        public string UserAddressFile { get; set; } = string.Empty;
-
-        /// <summary>
-        /// Any additional description regarding the user. This is an optional field
-        /// with a maximum length of 500 characters.
-        /// </summary>
-        [StringLength(500)]
-        public string UserDescriptionFile { get; set; } = string.Empty;
-
-        /// <summary>
-        /// The source of the user's data. This is an optional field with a maximum length
-        /// of 100 characters, used to store reference information about data origin.
+        /// Father's name of the user as recorded in their file. Optional, max length 50 characters.
         /// </summary>
         [StringLength(100)]
-        public string UserSourceFile { get; set; } = string.Empty;
+        public string? UserFatherNameFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// The Telegram ID of the user, used as a unique identifier within the application.
-        /// This field is required and must be unique for each user.
+        /// Birth date of the user, stored as a string in "yyyy-MM-dd" format. Optional.
         /// </summary>
-        [Required]
-        public long UserTelegramID { get; set; }
-
-        // New relationship to store the call history
-        public virtual ICollection<CallHistory> CallHistory { get; set; } = new List<CallHistory>();
+        [StringLength(20)]
+        public string? UserBirthDayFile { get; set; }
 
         /// <summary>
-        /// Gets or sets the collection of user permissions.
+        /// Address of the user as recorded in their file. Optional, max length 200 characters.
         /// </summary>
-        public virtual ICollection<UserPermission> UserPermissions { get; set; } = new List<UserPermission>();
+        [StringLength(250)] // Adjust based on the maximum expected length
+        public string? UserAddressFile { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Additional description about the user. Optional, max length 500 characters.
+        /// </summary>
+        [StringLength(50)]
+        public string? UserDescriptionFile { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Source of the user's data (e.g., data origin). Optional, max length 100 characters.
+        /// </summary>
+        [StringLength(50)]
+        public string? UserSourceFile { get; set; } = string.Empty;
+
+  
+        public long? UserTelegramID { get; set; }
+
+        #endregion
+
     }
 }
