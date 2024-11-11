@@ -545,9 +545,11 @@ namespace CustomerMonitoringApp.WPFApp
                             return;
                         }
 
+
+                        bool isUserFile = await IsUserFile(filePath);
                         // Step 3: Identify file type (CallHistory or UsersUpdate)
                         bool isCallHistory = await IsCallHistoryFileAsync(filePath);
-                        bool isUserFile = await IsUserFile(filePath);
+                   
                         // 2. Add the parsed data to the repository (saving to database)
 
                         if (isCallHistory)
@@ -1459,11 +1461,6 @@ namespace CustomerMonitoringApp.WPFApp
                 using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
                 await botClient.SendDocument(chatId, new InputFileStream(stream, $"getcalls_{phoneNumber}_{DateTime.UtcNow:yyyyMMddHHmmss}.csv"), cancellationToken: cancellationToken);
 
-
-                await botClient.SendMessage(chatId, "❌ *Error processing command*\n\n" +
-                                                    "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support.",
-                    cancellationToken: cancellationToken);
-
                 // Clean up by deleting the temporary file after sending
                 File.Delete(csvFilePath);
             }
@@ -1673,10 +1670,25 @@ namespace CustomerMonitoringApp.WPFApp
         }
 
 
-
         private async Task<bool> IsCallHistoryFileAsync(string filePath)
         {
-            // Check if the file follows the expected structure for a CallHistory file
+            // Define expected headers for the CallHistory file
+            var expectedHeaders = new List<string>
+    {
+        "شماره مبدا",  // Source Phone
+        "شماره مقصد",  // Destination Phone
+        "تاریخ",        // Date
+        "ساعت",         // Time
+        "مدت",          // Duration
+        "نوع تماس"      // Call Type
+    }
+            .Select(header => CleanHeader(header))  // Clean the expected headers
+            .ToList();
+
+            // Set match threshold (70%)
+            double matchThreshold = 0.7;
+            int requiredMatches = (int)Math.Ceiling(expectedHeaders.Count * matchThreshold);
+
             try
             {
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
@@ -1707,28 +1719,25 @@ namespace CustomerMonitoringApp.WPFApp
                         return false;
                     }
 
-                    // Expected headers for CallHistory file
-                    var expectedHeaders = new List<string>
-            {
-                "شماره مبدا",  // Source Phone
-                "شماره مقصد",  // Destination Phone
-                "تاریخ",        // Date
-                "ساعت",         // Time
-                "مدت",          // Duration
-                "نوع تماس"      // Call Type
-            };
-
-                    // Validate headers
+                    // Retrieve headers from the first row, clean them and compare
+                    var headers = new List<string>();
                     for (int col = 1; col <= columnCount; col++)
                     {
-                        var header = worksheet.Cells[1, col].Text.Trim(); // Trim any extra spaces from headers
+                        var header = worksheet.Cells[1, col].Text.Trim();
+                        headers.Add(CleanHeader(header));
+                    }
 
-                        // Check if any header matches the expected ones
-                        if (!expectedHeaders.Contains(header))
-                        {
-                           // Log($"Error: Invalid header '{header}' at column {col}.");
-                            return false;
-                        }
+                    // Log found headers for debugging
+                    Log($"Found headers: {string.Join(", ", headers)}");
+
+                    // Check if the headers match the expected headers with the given threshold
+                    int matchedHeaderCount = headers.Intersect(expectedHeaders).Count();
+
+                    // If the matched headers are below the threshold, return false
+                    if (matchedHeaderCount < requiredMatches)
+                    {
+                        Log($"Error: Insufficient matching headers. Expected at least {requiredMatches} matches, found {matchedHeaderCount}.");
+                        return false;
                     }
 
                     // Check if there are enough rows of data (at least 2 rows: 1 header + 1 data row)
@@ -1742,7 +1751,7 @@ namespace CustomerMonitoringApp.WPFApp
                     int validRowCount = 0;
 
                     // Validate each data row
-                    for (int row = 2; row <= 5; row++)
+                    for (int row = 2; row <= rowCount; row++)  // Start from row 2 (skipping header row)
                     {
                         var sourcePhone = worksheet.Cells[row, 1].Text.Trim();  // Column A: "شماره مبدا"
                         var destinationPhone = worksheet.Cells[row, 2].Text.Trim(); // Column B: "شماره مقصد"
@@ -1754,8 +1763,7 @@ namespace CustomerMonitoringApp.WPFApp
                         // Skip row if phone numbers are not numeric
                         if (!IsNumeric(sourcePhone) || !IsNumeric(destinationPhone))
                         {
-                          //
-                          // Log($"INFO: Skipping row {row} due to non-numeric phone numbers. Source Phone: '{sourcePhone}', Destination Phone: '{destinationPhone}'");
+                            // Log($"INFO: Skipping row {row} due to non-numeric phone numbers.");
                             continue;  // Skip this row and move to the next one
                         }
 
@@ -1779,14 +1787,14 @@ namespace CustomerMonitoringApp.WPFApp
                         // Increment valid row counter
                         validRowCount++;
 
-                        // If we have more than 30 valid rows, return true
-                        if (validRowCount > 30)
+                        // If we have more than 2 valid rows, return true
+                        if (validRowCount > 2)
                         {
                             return true;
                         }
                     }
 
-                    // If we don't have more than 30 valid rows, return false
+                    // If we don't have more than 2 valid rows, return false
                     return false;
                 }
             }
@@ -1822,11 +1830,19 @@ namespace CustomerMonitoringApp.WPFApp
 
         private async Task<bool> IsUserFile(string filePath)
         {
+            // Define expected headers for user data, trim spaces and remove any special characters like colons
+            var expectedHeaders = new List<string> { "شماره تلفن", "نام", "نام خانوادگی", "نام پدر", "تاریخ تولد", "نشانی" }
+                .Select(header => CleanHeader(header)).ToList();
+
+            // Set match threshold (70%)
+            double matchThreshold = 0.7;
+            int requiredMatches = (int)Math.Ceiling(expectedHeaders.Count * matchThreshold);
+
             try
             {
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
-                    // Ensure that there is at least one worksheet
+                    // Ensure there is at least one worksheet
                     var worksheet = package.Workbook.Worksheets.FirstOrDefault();
                     if (worksheet == null)
                     {
@@ -1834,62 +1850,59 @@ namespace CustomerMonitoringApp.WPFApp
                         return false;
                     }
 
-                    // Retrieve row and column counts
-                    var rowCount = worksheet.Dimension?.Rows ?? 0;
-  
-                    // Check if there are enough rows of data (at least 2 rows: 1 header + 1 data row)
-                    if (rowCount < 2)
+                    // Retrieve headers from the first row, trimming spaces and removing special characters
+                    var headers = new List<string>();
+                    for (int col = 1; col <= worksheet.Dimension?.Columns; col++)
                     {
-                        Log("Error: File contains too few rows (must be at least 2).");
+                        var header = worksheet.Cells[1, col].Text.Trim();
+                        if (!string.IsNullOrEmpty(header))
+                        {
+                            headers.Add(CleanHeader(header));
+                        }
+                    }
+
+                    // Log found headers for debugging
+                    Log($"Found headers: {string.Join(", ", headers)}");
+
+                    if (!headers.Any())
+                    {
+                        Log("Error: No headers found in the first row.");
                         return false;
                     }
 
-                    // Validate each data row (from row 2 onward)
-                    for (int row = 2; row <= 2; row++)
+                    // Count matching headers
+                    int matchedHeadersCount = headers.Intersect(expectedHeaders).Count();
+
+                    // Validate the match count against the threshold
+                    if (matchedHeadersCount >= requiredMatches)
                     {
-                        var phoneNumber = worksheet.Cells[row, 1].Text.Trim();  // Column A: "شماره تلفن"
-                        var firstName = worksheet.Cells[row, 2].Text.Trim();    // Column B: "نام"
-                        var lastName = worksheet.Cells[row, 3].Text.Trim();     // Column C: "نام خانوادگی"
-                        var fatherName = worksheet.Cells[row, 4].Text.Trim();   // Column D: "نام پدر"
-                        var birthDate = worksheet.Cells[row, 5].Text.Trim();    // Column E: "تاریخ تولد"
-                        var address = worksheet.Cells[row, 6].Text.Trim();     // Column F: "نشانی"
-
-                        // Validate if essential data is available and non-empty
-                        if (string.IsNullOrWhiteSpace(phoneNumber) || string.IsNullOrWhiteSpace(firstName) ||
-                            string.IsNullOrWhiteSpace(lastName) || string.IsNullOrWhiteSpace(fatherName) ||
-                            string.IsNullOrWhiteSpace(birthDate) || string.IsNullOrWhiteSpace(address))
-                        {
-                            // Log exactly which field is missing
-                            var missingFields = new List<string>();
-                            if (string.IsNullOrWhiteSpace(phoneNumber)) missingFields.Add("Phone Number");
-                            if (string.IsNullOrWhiteSpace(firstName)) missingFields.Add("First Name");
-                            if (string.IsNullOrWhiteSpace(lastName)) missingFields.Add("Last Name");
-                            if (string.IsNullOrWhiteSpace(fatherName)) missingFields.Add("Father's Name");
-                            if (string.IsNullOrWhiteSpace(birthDate)) missingFields.Add("Birth Date");
-                            if (string.IsNullOrWhiteSpace(address)) missingFields.Add("Address");
-
-                            Log($"Error: Row {row} contains missing data in the following field(s): {string.Join(", ", missingFields)}");
-                            return false;  // Incomplete row, invalid file
-                        }
-
-                        // Validate the format of Phone Number (e.g., check if it starts with "98" and has the correct number of digits)
-                        if (!IsValidPhoneNumber(phoneNumber))
-                        {
-                            Log($"Error: Invalid phone number format in row {row}. Phone Number: '{phoneNumber}'");
-                            return false; // Invalid phone number format
-                        }
+                        Log($"Success: Recognized as user file. Matched headers: {string.Join(", ", headers.Intersect(expectedHeaders))}");
+                        return true;  // Likely a user file
                     }
-
-                    // If we have passed all checks, return true
-                    return true;
+                    else
+                    {
+                        var missingHeaders = expectedHeaders.Except(headers).ToList();
+                        Log($"Error: Insufficient matching headers. Expected at least {requiredMatches} matches, found {matchedHeadersCount}. Missing headers: {string.Join(", ", missingHeaders)}.");
+                        return false;  // Not enough matches
+                    }
                 }
             }
             catch (Exception ex)
             {
                 Log($"Error checking file type: {ex.Message}");
-                return false;  // If an error occurs, assume the file is not a valid User file
+                return false;
             }
         }
+
+        // Helper function to clean the header text (removes spaces, colons, etc.)
+        private string CleanHeader(string header)
+        {
+            return header
+                .Replace(":", "")  // Remove colons
+                .Replace(" ", "")  // Remove spaces
+                .ToLower();        // Convert to lowercase
+        }
+
 
         // Helper method to validate Phone Number
         /// <summary>
@@ -2415,22 +2428,25 @@ namespace CustomerMonitoringApp.WPFApp
 
 
 
-        private async Task ImportExcelToDatabase(string filePath, ITelegramBotClient botClient, long chatId,
-     CancellationToken cancellationToken)
+        private async Task ImportExcelToDatabase(string filePath, ITelegramBotClient botClient, long chatId, CancellationToken cancellationToken)
         {
             var usersToImport = new List<User>();
             var errors = new List<string>(); // To collect error messages
             const int BatchSize = 1000; // Define a batch size for processing
             var processedRows = 0; // Track the number of processed rows
             var startTime = DateTime.Now; // Track the start time of the operation
+            int totalRows = 0; // Track total number of rows in the worksheet for progress calculation
+
+            // Variable to hold the message reference for editing progress
+            Message progressMessage = null;
+            int lastProgress = -1; // Track the last progress percentage to prevent redundant updates
 
             try
             {
                 // Validate file existence
                 if (!File.Exists(filePath))
                 {
-                    await NotifyUser(botClient, chatId, "Error: The specified Excel file does not exist. Please send the file again.",
-                        cancellationToken);
+                    await NotifyUser(botClient, chatId, "Error: The specified Excel file does not exist. Please send the file again.", cancellationToken);
                     return;
                 }
 
@@ -2448,8 +2464,7 @@ namespace CustomerMonitoringApp.WPFApp
                 var worksheet = package.Workbook.Worksheets.FirstOrDefault();
                 if (worksheet == null)
                 {
-                    await NotifyUser(botClient, chatId, "Error: No worksheet found in the Excel file. Please send the file again.",
-                        cancellationToken);
+                    await NotifyUser(botClient, chatId, "Error: No worksheet found in the Excel file. Please send the file again.", cancellationToken);
                     return;
                 }
 
@@ -2462,11 +2477,18 @@ namespace CustomerMonitoringApp.WPFApp
                     return;
                 }
 
-                Log($"Worksheet is valid with {worksheet.Dimension.Rows} rows.");
+                totalRows = worksheet.Dimension.Rows; // Store the total number of rows
+                Log($"Worksheet is valid with {totalRows} rows.");
+
+                // Send initial progress message
+                progressMessage = await botClient.SendTextMessageAsync(
+                    chatId,
+                    "Import in progress: 0%",
+                    cancellationToken: cancellationToken
+                );
 
                 // Loop through rows and process each user
-                int rowCount = worksheet.Dimension.Rows;
-                for (int row = 2; row <= rowCount; row++)
+                for (int row = 2; row <= totalRows; row++)
                 {
                     if (cancellationToken.IsCancellationRequested) break;
 
@@ -2480,15 +2502,28 @@ namespace CustomerMonitoringApp.WPFApp
                         }
 
                         processedRows++;
+
+                        // Calculate progress percentage (capped at 100%)
+                        int progress = (int)((double)processedRows / totalRows * 100);
+                        progress = Math.Min(progress, 100); // Ensure it does not exceed 100%
+
+                        // Only update if progress has changed
+                        if (progress != lastProgress)
+                        {
+                            await EditProgressMessage(botClient, chatId, progressMessage, progress, cancellationToken);
+                            lastProgress = progress; // Update last progress to the current one
+                        }
+
+                        // Log progress every 10 rows (optional for local debugging)
                         if (processedRows % 10 == 0)
                         {
-                            Log($"Processed {processedRows} rows.");
+                            Log($"Processed {processedRows}/{totalRows} rows ({progress}%).");
                         }
 
                         // Save users in batches
                         if (usersToImport.Count >= BatchSize)
                         {
-                            await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken,filePath);
+                            await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken, filePath);
                             usersToImport.Clear();
                         }
 
@@ -2503,20 +2538,18 @@ namespace CustomerMonitoringApp.WPFApp
                 // Save remaining users
                 if (usersToImport.Count > 0)
                 {
-                    await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken,filePath);
+                    await SaveUsersToDatabase(usersToImport, botClient, chatId, cancellationToken, filePath);
                 }
 
-                // Notify user
+                // Notify user about completion
                 if (errors.Count > 0)
                 {
                     string errorMessage = string.Join("\n", errors);
-                    await NotifyUser(botClient, chatId,
-                        $"Some users were not imported due to the following errors:\n{errorMessage}\nPlease send the file again.",
-                        cancellationToken);
+                    await NotifyUser(botClient, chatId, $"Some users were not imported due to the following errors:\n{errorMessage}\nPlease send the file again.", cancellationToken);
                 }
                 else
                 {
-                    await NotifyUser(botClient, chatId, $"Successfully imported {rowCount - 1} users.", cancellationToken);
+                    await NotifyUser(botClient, chatId, $"Successfully imported {processedRows} users.", cancellationToken);
                 }
 
                 var endTime = DateTime.Now;
@@ -2526,12 +2559,37 @@ namespace CustomerMonitoringApp.WPFApp
             catch (Exception ex)
             {
                 Log($"Unexpected Error: {ex.Message}");
-                await NotifyUser(botClient, chatId,
-                    "❌ Oops! An unexpected error occurred. Please try again later or contact support. Please send the file again.",
-                    cancellationToken);
+                await NotifyUser(botClient, chatId, "❌ Oops! An unexpected error occurred. Please try again later or contact support. Please send the file again.", cancellationToken);
             }
         }
 
+
+        // Method to edit the progress message
+        private async Task EditProgressMessage(ITelegramBotClient botClient, long chatId, Message progressMessage, int progressPercentage, CancellationToken cancellationToken)
+        {
+            if (progressMessage != null)
+            {
+                var progressText = $"Import Progress: {progressPercentage}%";
+                try
+                {
+                    // Only edit if the message content is different
+                    if (progressMessage.Text != progressText)
+                    {
+                        // Edit the progress message with the updated progress
+                        await botClient.EditMessageText(
+                            chatId,
+                            progressMessage.MessageId,
+                            progressText,
+                            cancellationToken: cancellationToken
+                        );
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Error editing progress message: {ex.Message}");
+                }
+            }
+        }
 
 
         #region User Creation and Update Methods
@@ -2548,7 +2606,6 @@ namespace CustomerMonitoringApp.WPFApp
         {
             // Retrieve and trim values from the worksheet
             var userPhone = worksheet.Cells[row, 1].Text.Trim();
-            Console.WriteLine($"Row {row}: Extracted user phone = '{userPhone}'"); // Debugging output
 
             var userName = worksheet.Cells[row, 2].Text.Trim();
             var userFamily = worksheet.Cells[row, 3].Text.Trim();
@@ -2896,7 +2953,7 @@ namespace CustomerMonitoringApp.WPFApp
             stopwatch.Start();
 
             // Region 2: Main logic for batch processing and data insertion with transaction handling and optimization
-            int batchSize = 1000; // Adjust batch size for optimized memory usage and performance
+            int batchSize = 20000; // Adjust batch size for optimized memory usage and performance
             using var dbContext = new AppDbContext(options);
             using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
 
@@ -2923,7 +2980,7 @@ namespace CustomerMonitoringApp.WPFApp
                 });
 
                 stopwatch.Stop();
-                await NotifyUser(botClient, chatId, $"Data imported successfully in {stopwatch.Elapsed.TotalSeconds} seconds.", cancellationToken);
+               // await NotifyUser(botClient, chatId, $"Data imported successfully in {stopwatch.Elapsed.TotalSeconds} seconds.", cancellationToken);
                 Log($"All rows imported successfully. Total time: {stopwatch.Elapsed.TotalSeconds} seconds.");
             }
             catch (OperationCanceledException)

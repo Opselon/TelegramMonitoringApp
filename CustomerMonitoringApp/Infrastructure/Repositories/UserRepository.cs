@@ -47,6 +47,9 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
             }
         }
 
+
+
+
         public async Task<User?> GetUserByPhoneNumberAsync(string phoneNumber)
         {
             try
@@ -63,6 +66,10 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                 throw new Exception("An error occurred while fetching user by phone number.", ex);
             }
         }
+
+
+
+
         public Task<IEnumerable<User>> GetUsersBornBeforeYearAsync(int year)
         {
             throw new NotImplementedException();

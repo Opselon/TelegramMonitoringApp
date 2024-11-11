@@ -154,8 +154,8 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
         public async Task SaveBulkDataAsync(DataTable dataTable)
         {
             string connectionString = "Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True";
-            const int batchSize = 1000; // تنظیم اندازه دسته
-            const int bulkCopyTimeout = 300; // تایم‌اوت بیشتر برای درج داده‌های حجیم
+            const int batchSize = 100000; // تنظیم اندازه دسته
+            const int bulkCopyTimeout = 60; // تایم‌اوت بیشتر برای درج داده‌های حجیم
 
             try
             {
@@ -342,35 +342,13 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
             }
         }
 
-
-        /// <summary>
-        /// Retrieves selected call history fields for a specific phone number, excluding sensitive data by returning a DTO.
-        /// This is now executed as a background job using Hangfire.
-        /// </summary>
-        public Task<List<CallHistory>> GetCallsByPhoneNumberAsync(string phoneNumber)
+        public async Task<List<CallHistory>> GetCallsByPhoneNumberAsync(string phoneNumber)
         {
-            // Enqueue the background job for processing the call history retrieval
-            _backgroundJobClient.Enqueue(() => ProcessGetCallsByPhoneNumberAsync(phoneNumber));
-
-            // Return an empty list (or handle it as needed) since the actual job runs in the background.
-            // If you want to return something, consider adding an alternative mechanism, such as a callback, for returning the result.
-            return Task.FromResult(new List<CallHistory>());
-        }
-
-        /// <summary>
-        /// Process the call history retrieval in the background job.
-        /// This method is called by Hangfire.
-        /// </summary>
-        public async Task ProcessGetCallsByPhoneNumberAsync(string phoneNumber)
-        {
-            var result = new List<CallHistory>();
-
             try
             {
-                // Fetch the call history for the given phone number from the database
-                result = await _context.CallHistories
+                var callHistories = await _context.CallHistories
                     .Where(ch => ch.SourcePhoneNumber == phoneNumber || ch.DestinationPhoneNumber == phoneNumber)
-                    .Select(ch => new CallHistory // Map only specific properties
+                    .Select(ch => new CallHistory
                     {
                         SourcePhoneNumber = ch.SourcePhoneNumber,
                         DestinationPhoneNumber = ch.DestinationPhoneNumber,
@@ -381,18 +359,17 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                     })
                     .ToListAsync();
 
-                // Optionally, log the result or handle it as needed
-                _logger.LogInformation($"Successfully fetched call history for phone number: {phoneNumber}. Total records: {result.Count}");
-
-                // You can process the result further here, such as storing it in a file or sending it to a message queue
+                _logger.LogInformation($"Fetched {callHistories.Count} records for phone number: {phoneNumber}");
+                return callHistories;
             }
             catch (Exception ex)
             {
-                // Log any errors that occur during the call history retrieval process
-                _logger.LogError(ex, "Error occurred while fetching call history for phone number: {PhoneNumber}", phoneNumber);
+                _logger.LogError(ex, "Error occurred while fetching call history for phone number: {PhoneNumber}",
+                    phoneNumber);
+                return new List<CallHistory>(); // Return an empty list on failure
             }
-        }
 
+        }
 
 
         /// <summary>
@@ -575,16 +552,6 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
 
         public async Task<List<CallHistoryWithUserNames>> GetCallsWithUserNamesAsync(string phoneNumber)
         {
-            // Enqueue a background job to process calls
-            var jobId = _backgroundJobClient.Enqueue(() => ProcessCallsWithUserNamesAsync(phoneNumber));
-
-            // Return an empty list or some indication that the job is enqueued
-            return new List<CallHistoryWithUserNames>();  // You can replace this with any placeholder logic
-        }
-
-        // Background job to process calls
-        public async Task ProcessCallsWithUserNamesAsync(string phoneNumber)
-        {
             try
             {
                 // Execute the query to retrieve calls and users
@@ -595,7 +562,7 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                     join receiver in _context.Users on call.DestinationPhoneNumber equals receiver.UserNumberFile into receiverInfo
                     from receiverData in receiverInfo.DefaultIfEmpty()
                     where call.SourcePhoneNumber == phoneNumber || call.DestinationPhoneNumber == phoneNumber
-                    select new
+                    select new CallHistoryWithUserNames
                     {
                         CallId = call.CallId,
                         SourcePhoneNumber = call.SourcePhoneNumber,
@@ -608,28 +575,12 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                         ReceiverName = receiverData != null ? receiverData.UserFamilyFile : string.Empty
                     }).ToListAsync();
 
-                // Map to CallHistoryWithUserNames object
-                var results = queryResults.Select(result => new CallHistoryWithUserNames
-                {
-                    CallId = result.CallId,
-                    SourcePhoneNumber = result.SourcePhoneNumber,
-                    DestinationPhoneNumber = result.DestinationPhoneNumber,
-                    CallDateTime = result.CallDateTime,
-                    Duration = result.Duration,
-                    CallType = result.CallType,
-                    FileName = result.FileName,
-                    CallerName = result.CallerName,
-                    ReceiverName = result.ReceiverName
-                }).ToList();
-
-                // Log or process the results, e.g., send the results to the user or store them
-                Console.WriteLine($"Processed {results.Count} calls for phone number: {phoneNumber}");
-
-                // Further logic can be implemented here to handle the results (e.g., notification, storage)
+                return queryResults;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error in ProcessCallsWithUserNamesAsync: {ex.Message}");
+                Console.WriteLine($"Error in GetCallsWithUserNamesAsync: {ex.Message}");
+                return new List<CallHistoryWithUserNames>(); // Return an empty list if there is an error
             }
         }
 
