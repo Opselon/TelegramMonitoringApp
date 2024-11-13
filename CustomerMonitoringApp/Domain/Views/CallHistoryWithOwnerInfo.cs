@@ -22,7 +22,7 @@ namespace CustomerMonitoringApp.Domain.Views
         /// Indexed for performance optimization.
         /// </summary>
         [Required]
-        [StringLength(50)] // Ensuring length to avoid database issues
+        [StringLength(13)] // Ensuring length to avoid database issues
         public string SourcePhoneNumber { get; set; } = string.Empty;
 
         /// <summary>
@@ -30,7 +30,7 @@ namespace CustomerMonitoringApp.Domain.Views
         /// Indexed for performance optimization.
         /// </summary>
         [Required]
-        [StringLength(50)] // Ensuring length to avoid database issues
+        [StringLength(13)] // Ensuring length to avoid database issues
         public string DestinationPhoneNumber { get; set; } = string.Empty;
 
         /// <summary>
@@ -38,7 +38,7 @@ namespace CustomerMonitoringApp.Domain.Views
         /// Stored as a string, formatted as "yyyy-MM-dd HH:mm:ss".
         /// </summary>
         [Required]
-        [StringLength(50)] // For optimized storage of datetime as a string
+        [StringLength(20)] // For optimized storage of datetime as a string
         public string CallDateTime { get; set; } = string.Empty;
 
         /// <summary>
@@ -52,13 +52,13 @@ namespace CustomerMonitoringApp.Domain.Views
         /// Type of the call (e.g., "Incoming", "Outgoing").
         /// </summary>
         [Required]
-        [StringLength(50)] // Set a length limit for call type
+        [StringLength(15)] // Set a length limit for call type
         public string CallType { get; set; } = string.Empty;
 
         /// <summary>
         /// The file name related to the call.
         /// </summary>
-        [StringLength(100)] // Assuming the file name can be long
+        [StringLength(20)] // Assuming the file name can be long
         public string FileName { get; set; } = string.Empty;
 
         /// <summary>

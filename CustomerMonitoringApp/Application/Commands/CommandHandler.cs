@@ -67,9 +67,9 @@ namespace CustomerMonitoringApp.Application.Commands
                     var excelReader = new ExcelReaderService();
                     var users = excelReader.ParseExcelFile(fileInfo.FilePath);
 
-                    foreach (var userDto in users)
+                    // Create a list of tasks to process user additions in parallel
+                    var userTasks = users.Select(userDto =>
                     {
-                        // Map the UserDto to User entity
                         var user = new User
                         {
                             UserTelegramID = userDto.UserTelegramID,
@@ -84,9 +84,12 @@ namespace CustomerMonitoringApp.Application.Commands
                             UserSourceFile = userDto.UserSourceFile,
                         };
 
-                        // Add the user to the database
-                        await _userRepository.AddUserAsync(user);
-                    }
+                        // Add the user to the database asynchronously
+                        return _userRepository.AddUserAsync(user);
+                    }).ToList();
+
+                    // Wait for all the user insertions to complete in parallel
+                    await Task.WhenAll(userTasks);
 
                     // Notify the user that the file has been processed
                     await _botClient.SendMessage(message.Chat.Id, "File processed and users added to the database.");
@@ -96,6 +99,7 @@ namespace CustomerMonitoringApp.Application.Commands
                     // Log the exception and notify the user of the error
                     await _botClient.SendMessage(message.Chat.Id, "An error occurred while processing the file.");
                     // Log the exception details (e.g., using a logging framework)
+                    // _logger.LogError(ex, "Error processing file and adding users.");
                 }
             }
         }

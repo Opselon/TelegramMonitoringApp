@@ -21,18 +21,18 @@ namespace CustomerMonitoringApp.Domain.Entities
         /// <summary>
         /// The phone number from which the call was made (source).
         /// </summary>
-        [StringLength(50)]
+        [StringLength(13)]
         public string SourcePhoneNumber { get; set; } = string.Empty;
 
         /// <summary>
         /// The phone number that received the call (destination).
         /// </summary>
-        [StringLength(50)]
+        [StringLength(13)]
         public string DestinationPhoneNumber { get; set; } = string.Empty;
 
      
         
-        [StringLength(50)]
+        [StringLength(20)]
         public string CallDateTime { get; set; }
 
         /// <summary>
@@ -43,10 +43,10 @@ namespace CustomerMonitoringApp.Domain.Entities
         /// <summary>
         /// The type of the call (e.g., inbound or outbound).
         /// </summary>
-        [StringLength(50)]
+        [StringLength(10)]
         public string CallType { get; set; } = string.Empty;
 
-        [StringLength(50)]
+        [StringLength(20)]
         // New Field to store the File Name
         public string FileName { get; set; }  // This is the new field
 

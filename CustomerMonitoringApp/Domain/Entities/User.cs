@@ -25,33 +25,33 @@ namespace CustomerMonitoringApp.Domain.Entities
         /// Username as displayed in the user's profile. Required, max length 100 characters.
         /// </summary>
 
-        [StringLength(100)]
+        [StringLength(15)]
         public string? UserNameProfile { get; set; } = string.Empty;
 
         /// <summary>
         /// Unique number associated with the user's file. Optional, max length 50 characters.
         /// </summary>
-        [StringLength(50)]
+        [StringLength(13)]
         public string? UserNumberFile { get; set; } = string.Empty;
 
         /// <summary>
         /// First name of the user as recorded in their file. Required, max length 50 characters.
         /// </summary>
 
-        [StringLength(120)]
+        [StringLength(20)]
         public string? UserNameFile { get; set; } = string.Empty;
 
         /// <summary>
         /// Family name of the user as recorded in their file. Required, max length 50 characters.
         /// </summary>
 
-        [StringLength(150)] // Adjust based on the maximum expected length
+        [StringLength(20)] // Adjust based on the maximum expected length
         public string? UserFamilyFile { get; set; } = string.Empty;
 
         /// <summary>
         /// Father's name of the user as recorded in their file. Optional, max length 50 characters.
         /// </summary>
-        [StringLength(100)]
+        [StringLength(15)]
         public string? UserFatherNameFile { get; set; } = string.Empty;
 
         /// <summary>
@@ -63,19 +63,19 @@ namespace CustomerMonitoringApp.Domain.Entities
         /// <summary>
         /// Address of the user as recorded in their file. Optional, max length 200 characters.
         /// </summary>
-        [StringLength(250)] // Adjust based on the maximum expected length
+        [StringLength(50)] // Adjust based on the maximum expected length
         public string? UserAddressFile { get; set; } = string.Empty;
 
         /// <summary>
         /// Additional description about the user. Optional, max length 500 characters.
         /// </summary>
-        [StringLength(50)]
+        [StringLength(20)]
         public string? UserDescriptionFile { get; set; } = string.Empty;
 
         /// <summary>
         /// Source of the user's data (e.g., data origin). Optional, max length 100 characters.
         /// </summary>
-        [StringLength(50)]
+        [StringLength(20)]
         public string? UserSourceFile { get; set; } = string.Empty;
 
   

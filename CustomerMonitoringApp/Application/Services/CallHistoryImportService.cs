@@ -82,7 +82,6 @@ namespace CustomerMonitoringApp.Application.Services
         }
 
 
-
         private DataTable ConvertToDataTable(List<CallHistory> records, string fileName)
         {
             var dataTable = new DataTable("CallHistory");
@@ -90,21 +89,29 @@ namespace CustomerMonitoringApp.Application.Services
             // Define columns with constraints
             dataTable.Columns.Add(new DataColumn("SourcePhoneNumber", typeof(string)) { MaxLength = 15 });
             dataTable.Columns.Add(new DataColumn("DestinationPhoneNumber", typeof(string)) { MaxLength = 15 });
-            dataTable.Columns.Add("CallDateTime", typeof(string));
+            dataTable.Columns.Add(new DataColumn("CallDateTime", typeof(string)) { MaxLength = 80 });  // Fix the syntax error here
             dataTable.Columns.Add(new DataColumn("Duration", typeof(int)) { DefaultValue = 0 });
             dataTable.Columns.Add(new DataColumn("CallType", typeof(string)) { MaxLength = 50 });
-            dataTable.Columns.Add(new DataColumn("FileName", typeof(string)) { MaxLength = 255 }); // Add FileName column
+            dataTable.Columns.Add(new DataColumn("FileName", typeof(string)) { MaxLength = 255 });
 
             // Add records to DataTable
             foreach (var record in records)
             {
                 var row = dataTable.NewRow();
 
-                // Ensure phone numbers do not exceed MaxLength
-                row["SourcePhoneNumber"] = record.SourcePhoneNumber?.Length > 15 ? record.SourcePhoneNumber.Substring(0, 15) : record.SourcePhoneNumber;
-                row["DestinationPhoneNumber"] = record.DestinationPhoneNumber?.Length > 15 ? record.DestinationPhoneNumber.Substring(0, 15) : record.DestinationPhoneNumber;
+                // Truncate phone numbers if they exceed MaxLength
+                row["SourcePhoneNumber"] = record.SourcePhoneNumber?.Length > 15
+                    ? record.SourcePhoneNumber.Substring(0, 15)
+                    : record.SourcePhoneNumber;
+                row["DestinationPhoneNumber"] = record.DestinationPhoneNumber?.Length > 15
+                    ? record.DestinationPhoneNumber.Substring(0, 15)
+                    : record.DestinationPhoneNumber;
 
-                row["CallDateTime"] = record.CallDateTime ?? "dd/MM/yyyy";
+                // Directly use the CallDateTime from the record as it is in Persian format
+                row["CallDateTime"] = !string.IsNullOrEmpty(record.CallDateTime)
+                    ? record.CallDateTime // Directly assign the date if it is in Persian format
+                    : "01/01/1970"; // Default value if CallDateTime is null or empty
+
                 row["Duration"] = record.Duration;
                 row["CallType"] = record.CallType ?? "Unknown";  // Default value if CallType is null
                 row["FileName"] = fileName; // Add FileName to DataTable
@@ -115,24 +122,45 @@ namespace CustomerMonitoringApp.Application.Services
             return dataTable;
         }
 
-
-
         // Method to parse the Excel file
+        /// <summary>
+        /// Parses the given Excel file and extracts call history records from the first worksheet.
+        /// </summary>
+        /// <param name="filePath">The path of the Excel file to parse.</param>
+        /// <returns>A list of CallHistory records parsed from the Excel file.</returns>
         private async Task<List<CallHistory>> ParseExcelFileAsync(string filePath)
         {
-            var records = new List<CallHistory>();
+            #region Initialize Local Variables
+            var records = new List<CallHistory>(); // List to hold parsed records
+            #endregion
 
+            #region Try-Catch for Error Handling
             try
             {
+                #region Check File Existence
+                // Check if the provided file exists
                 if (!File.Exists(filePath))
                 {
                     _logger.LogError($"The file '{filePath}' does not exist.");
                     return records;
                 }
+                #endregion
 
+
+
+
+                #region Open and Process Excel File
+
+
+
+                // Open the Excel file using EPPlus
                 using (var package = new ExcelPackage(new FileInfo(filePath)))
                 {
+
+
                     var worksheets = package.Workbook.Worksheets;
+
+                    #region Check for Worksheets
                     if (worksheets.Count == 0)
                     {
                         _logger.LogError("The Excel file contains no worksheets.");
@@ -147,7 +175,10 @@ namespace CustomerMonitoringApp.Application.Services
                         _logger.LogError("No valid worksheet found in the workbook.");
                         return records;
                     }
+                    #endregion
 
+                    #region Check for Valid Worksheet Dimension
+                    // Validate the worksheet dimensions (rows and columns)
                     if (worksheet.Dimension == null || worksheet.Dimension.Rows <= 1 ||
                         worksheet.Dimension.Columns == 0)
                     {
@@ -155,21 +186,32 @@ namespace CustomerMonitoringApp.Application.Services
                         return records;
                     }
 
+
+
+
+
                     var rowCount = worksheet.Dimension.Rows;
                     var colCount = worksheet.Dimension.Columns;
                     _logger.LogInformation($"The worksheet has {rowCount} rows and {colCount} columns.");
+                    #endregion
 
-                    // Add logging for rows processed
+                    #region Loop Through Rows and Parse Data
+                    // Iterate through rows in the worksheet starting from row 2 (skipping header)
                     for (int row = 2; row <= rowCount; row++)
                     {
                         _logger.LogInformation($"Processing row {row} of {rowCount}.");
+
+                        // Extract row values and trim any whitespace
                         var rowValues = worksheet.Cells[row, 1, row, colCount].Select(c => c.Text.Trim()).ToList();
+
+                        // Skip empty rows
                         if (rowValues.All(string.IsNullOrEmpty))
                         {
                             _logger.LogInformation($"Skipping empty row {row}.");
                             continue;
                         }
 
+                        // Parse individual row into a CallHistory record
                         var record = await ParseRowAsync(worksheet, row);
                         if (record != null)
                         {
@@ -180,144 +222,71 @@ namespace CustomerMonitoringApp.Application.Services
                             _logger.LogWarning($"Row {row} could not be parsed.");
                         }
                     }
+                    #endregion
                 }
+                #endregion
             }
             catch (Exception ex)
             {
                 _logger.LogError($"Error parsing Excel file: {ex.Message}");
-                throw;
+                throw; // Re-throw the exception after logging it
             }
+            #endregion
 
+            #region Return Parsed Records
+            // Log and return the total number of records parsed
             _logger.LogInformation($"Total records parsed: {records.Count}");
             return records;
+            #endregion
         }
+
 
         // Method to parse a single row from Excel
         private async Task<CallHistory> ParseRowAsync(ExcelWorksheet worksheet, int row)
         {
             try
             {
-                var sourcePhone = worksheet.Cells[row, 1]?.Text;
-                var destinationPhone = worksheet.Cells[row, 2]?.Text;
-                var persianDate = worksheet.Cells[row, 3]?.Text;
-                var callTime = worksheet.Cells[row, 4]?.Text;
-                var durationText = worksheet.Cells[row, 5]?.Text;
-                var callType = worksheet.Cells[row, 6]?.Text;
+                // Retrieve and trim values from the Excel row
+                var sourcePhone = worksheet.Cells[row, 1]?.Text?.Trim();
+                var destinationPhone = worksheet.Cells[row, 2]?.Text?.Trim();
+                var persianDate = worksheet.Cells[row, 3]?.Text?.Trim();
+                var callTime = worksheet.Cells[row, 4]?.Text?.Trim();
+                var durationText = worksheet.Cells[row, 5]?.Text?.Trim();
+                var callType = worksheet.Cells[row, 6]?.Text?.Trim();
 
-                if (string.IsNullOrWhiteSpace(sourcePhone) || string.IsNullOrWhiteSpace(destinationPhone) ||
-                    string.IsNullOrWhiteSpace(persianDate) || string.IsNullOrWhiteSpace(callTime) ||
-                    string.IsNullOrWhiteSpace(durationText) || string.IsNullOrWhiteSpace(callType))
+                // Skip the row if any mandatory field is missing or invalid
+                if (string.IsNullOrEmpty(sourcePhone) || string.IsNullOrEmpty(destinationPhone) ||
+                    string.IsNullOrEmpty(persianDate) || string.IsNullOrEmpty(callTime) ||
+                    string.IsNullOrEmpty(durationText) || string.IsNullOrEmpty(callType))
                 {
+                    _logger.LogWarning($"Row {row}: Missing required fields.");
                     return null; // Skip row if any mandatory field is missing
                 }
 
-                if (!TryParsePersianDate(persianDate, out DateTime callDateTime) ||
-                    !TryParseCallTime(callTime, out TimeSpan parsedTime))
-                {
-                    return null; // Skip row if date or time parsing fails
-                }
 
-                callDateTime = callDateTime.Add(parsedTime);
-
+                // Validate and parse duration
                 if (!int.TryParse(durationText, out int duration) || duration < 0)
                 {
+                    _logger.LogWarning($"Row {row}: Invalid call duration '{durationText}'.");
                     return null; // Skip row if duration is invalid
                 }
 
+                // Return the CallHistory record with the parsed data
                 return new CallHistory
                 {
-                    SourcePhoneNumber = sourcePhone.Trim(),
-                    DestinationPhoneNumber = destinationPhone.Trim(),
-                    CallDateTime = callDateTime.ToString() ?? "بدون تاریخ",
+                    SourcePhoneNumber = sourcePhone,
+                    DestinationPhoneNumber = destinationPhone,
+                    CallDateTime = persianDate + " | " + callTime, // Format for Persian date
                     Duration = duration,
-                    CallType = callType?.Trim() ?? "Unknown"
+                    CallType = callType ?? "Unknown"
                 };
             }
             catch (Exception ex)
             {
                 _logger.LogError($"Error parsing row {row}: {ex.Message}");
-                return null;
+                return null; // Return null if any error occurs during parsing
             }
         }
-
-
-        private bool TryParseCallTime(string callTime, out TimeSpan result)
-        {
-            result = default;
-            if (string.IsNullOrWhiteSpace(callTime)) return false;
-
-            return TimeSpan.TryParseExact(callTime.Trim(), new[] { "hh\\:mm\\:ss", "hh\\:mm" }, CultureInfo.InvariantCulture, out result);
-        }
-
-
-
-
-
-        public string ConvertToPersianDate(DateTime dateTime)
-        {
-            try
-            {
-                if (dateTime < new DateTime(622, 3, 21) || dateTime > new DateTime(9999, 12, 31)) return "Invalid Date Range";
-
-                var persianCalendar = new PersianCalendar();
-                int year = persianCalendar.GetYear(dateTime);
-                int month = persianCalendar.GetMonth(dateTime);
-                int day = persianCalendar.GetDayOfMonth(dateTime);
-
-                return $"{year}/{month:D2}/{day:D2}";
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogError($"Error converting DateTime to Persian date: {ex.Message}");
-                return "Conversion Error";
-            }
-        }
-
-        // Method to convert Persian date (e.g., 1403/04/31) to Gregorian DateTime
-        private bool TryParsePersianDate(string persianDate, out DateTime result)
-        {
-            result = DateTime.MinValue; // Default value for invalid dates
-            try
-            {
-                // Assume the date is in yyyy/MM/dd format
-                string[] dateParts = persianDate.Split('/');
-                if (dateParts.Length == 3)
-                {
-                    int year = int.Parse(dateParts[0]);
-                    int month = int.Parse(dateParts[1]);
-                    int day = int.Parse(dateParts[2]);
-
-                    PersianCalendar persianCalendar = new PersianCalendar();
-
-                    // Check if the month is valid
-                    if (month < 1 || month > 12)
-                    {
-                        _logger.LogWarning($"Invalid month {month} in Persian date '{persianDate}', using default date.");
-                        return false; // Invalid month
-                    }
-
-                    // Validate the number of days in the month
-                    int maxDaysInMonth = persianCalendar.GetDaysInMonth(year, month);
-                    if (day < 1 || day > maxDaysInMonth)
-                    {
-                        _logger.LogWarning($"Invalid day {day} for month {month} in Persian date '{persianDate}', using default date.");
-                        return false; // Invalid day
-                    }
-
-                    // Convert Persian date to Gregorian date
-                    result = persianCalendar.ToDateTime(year, month, day, 0, 0, 0, 0); // Time is set to 00:00:00
-                    return true;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError($"Error parsing Persian date '{persianDate}': {ex.Message}");
-            }
-
-            _logger.LogWarning($"Using default date for Persian date '{persianDate}' due to parsing failure.");
-            return false; // Invalid date
-        }
-
 
 
 
