@@ -1,5 +1,9 @@
 
 
+# Customer Monitoring Application
+
+## Description
+
 The **Customer Monitoring Application** is a robust WPF-based application designed to manage and monitor users and their permissions. It provides powerful features for businesses to efficiently manage user data, permissions, and interact with a secure SQL Server database using modern techniques like **Polly** for resilience and enhanced error handling. The app also integrates a **Telegram Bot**, allowing seamless communication for file imports, exports, and data management on the go.
 
 This application is optimized to handle large amounts of data securely, ensuring reliability even when working with large files.
@@ -182,11 +186,7 @@ public async Task ImportLargeFileAsync(string filePath, CancellationToken cancel
 
 ---
 
-## Contributing
 
-Contributions are welcome! If you have suggestions or improvements, please fork the repository and submit a pull request.
-
----
 
 ## License
 
@@ -194,10 +194,7 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ---
 
-## Acknowledgments
-
-- Special thanks to the contributors and the community for their support and feedback.
-
----
-
-This version of the **Customer Monitoring Application** has been enhanced to be secure, resilient, and efficient, particularly when dealing with large datasets and ensuring reliability even in the case of intermittent errors.
+Acknowledgments
+Special thanks to the contributors and the community for their support and feedback. This project wouldn't have been possible without the input and collaboration from the open-source community.
+A big thank you to the developers of Polly for making fault tolerance easier and more manageable.
+Thanks to Microsoft for providing the .NET ecosystem and Telegram for their Bot API, which enables smooth integration into this project.
