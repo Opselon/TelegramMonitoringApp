@@ -1,10 +1,4 @@
-To further enhance the **Customer Monitoring Application** and incorporate best practices like **Polly** for resilience, **database security** for large data handling, and error management, here's an updated version of the **README.md** that reflects the latest best technologies and improvements in your project:
 
----
-
-# Customer Monitoring Application
-
-## Description
 
 The **Customer Monitoring Application** is a robust WPF-based application designed to manage and monitor users and their permissions. It provides powerful features for businesses to efficiently manage user data, permissions, and interact with a secure SQL Server database using modern techniques like **Polly** for resilience and enhanced error handling. The app also integrates a **Telegram Bot**, allowing seamless communication for file imports, exports, and data management on the go.
 
