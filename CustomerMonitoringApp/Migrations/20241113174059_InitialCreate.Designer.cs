@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace CustomerMonitoringApp.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20241110203621_InitialCreate1")]
-    partial class InitialCreate1
+    [Migration("20241113174059_InitialCreate")]
+    partial class InitialCreate
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -35,7 +35,7 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("CallDateTime")
                         .IsRequired()
-                        .HasMaxLength(50)
+                        .HasMaxLength(20)
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("CallType")
@@ -55,8 +55,8 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("FileName")
                         .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("SourcePhoneNumber")
                         .IsRequired()
@@ -136,13 +136,13 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("CallDateTime")
                         .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("CallType")
                         .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
+                        .HasMaxLength(15)
+                        .HasColumnType("nvarchar(15)");
 
                     b.Property<string>("CallerName")
                         .HasMaxLength(100)
@@ -150,16 +150,16 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("DestinationPhoneNumber")
                         .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
+                        .HasMaxLength(13)
+                        .HasColumnType("nvarchar(13)");
 
                     b.Property<int>("Duration")
                         .HasColumnType("int");
 
                     b.Property<string>("FileName")
                         .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("nvarchar(100)");
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
 
                     b.Property<string>("ReceiverName")
                         .HasMaxLength(100)
@@ -167,8 +167,8 @@ namespace CustomerMonitoringApp.Migrations
 
                     b.Property<string>("SourcePhoneNumber")
                         .IsRequired()
-                        .HasMaxLength(50)
-                        .HasColumnType("nvarchar(50)");
+                        .HasMaxLength(13)
+                        .HasColumnType("nvarchar(13)");
 
                     b.HasKey("CallId");
 

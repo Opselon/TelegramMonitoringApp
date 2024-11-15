@@ -5,7 +5,7 @@
 namespace CustomerMonitoringApp.Migrations
 {
     /// <inheritdoc />
-    public partial class InitialCreate1 : Migration
+    public partial class InitialCreate : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -18,10 +18,10 @@ namespace CustomerMonitoringApp.Migrations
                         .Annotation("SqlServer:Identity", "1, 1"),
                     SourcePhoneNumber = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
                     DestinationPhoneNumber = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    CallDateTime = table.Column<string>(type: "nvarchar(max)", maxLength: 50, nullable: false),
+                    CallDateTime = table.Column<string>(type: "nvarchar(max)", maxLength: 20, nullable: false),
                     Duration = table.Column<int>(type: "int", nullable: false, defaultValue: 0),
                     CallType = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    FileName = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false)
+                    FileName = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false)
                 },
                 constraints: table =>
                 {
@@ -34,12 +34,12 @@ namespace CustomerMonitoringApp.Migrations
                 {
                     CallId = table.Column<int>(type: "int", nullable: false)
                         .Annotation("SqlServer:Identity", "1, 1"),
-                    SourcePhoneNumber = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    DestinationPhoneNumber = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    CallDateTime = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                    SourcePhoneNumber = table.Column<string>(type: "nvarchar(13)", maxLength: 13, nullable: false),
+                    DestinationPhoneNumber = table.Column<string>(type: "nvarchar(13)", maxLength: 13, nullable: false),
+                    CallDateTime = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
                     Duration = table.Column<int>(type: "int", nullable: false),
-                    CallType = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    FileName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    CallType = table.Column<string>(type: "nvarchar(15)", maxLength: 15, nullable: false),
+                    FileName = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false),
                     CallerName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
                     ReceiverName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true)
                 },

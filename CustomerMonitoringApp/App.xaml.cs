@@ -19,6 +19,8 @@ using Hangfire;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Data.SqlClient;
+using System.Data;
 
 namespace CustomerMonitoringApp
 {
@@ -69,6 +71,9 @@ namespace CustomerMonitoringApp
             // to avoid premature disposal of request streams.
 
             #endregion
+
+            // Use Hangfire Dashboard (optional)
+            app.UseHangfireDashboard();
 
             app.UseRouting();
 
@@ -127,10 +132,11 @@ namespace CustomerMonitoringApp
                 // Enable buffering for large responses.
                 options.RespectBrowserAcceptHeader = true;
             });
-        
 
-        // Register ITelegramBotClient with the DI container
-        services.AddSingleton<ITelegramBotClient>(new TelegramBotClient("6768055952:AAGSETUCUC76eXuSoAGX6xcsQk1rrt0K4Ng"));
+            services.AddTransient<IDbConnection>(sp => new SqlConnection("Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True"));
+
+            // Register ITelegramBotClient with the DI container
+            services.AddSingleton<ITelegramBotClient>(new TelegramBotClient("7873662243:AAGr-x9Y0UM4jVdWia6UKpl7o6T-UJztOIc"));
 
             // Add logging services
             services.AddLogging(configure => configure.AddConsole());
@@ -149,7 +155,7 @@ namespace CustomerMonitoringApp
                 ));
 
             services.AddHangfire(configuration => configuration
-                .UseSqlServerStorage("Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True",
+                .UseSqlServerStorage(@"Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True",
                     new SqlServerStorageOptions
                     {
                         CommandBatchMaxTimeout = TimeSpan.FromMinutes(5),

@@ -56,5 +56,19 @@ namespace CustomerMonitoringApp.Application.DTOs
         /// Gets or sets the source file associated with the user.
         /// </summary>
         public string? UserSourceFile { get; set; }
+
+        // Optionally, you can add a constructor to initialize required fields:
+        public UserDto(long userTelegramID, string userNameProfile, string userNumberFile)
+        {
+            UserTelegramID = userTelegramID;
+            UserNameProfile = userNameProfile ?? throw new ArgumentNullException(nameof(userNameProfile), "User name profile cannot be null");
+            UserNumberFile = userNumberFile ?? throw new ArgumentNullException(nameof(userNumberFile), "User number file cannot be null");
+        }
+
+        // Optionally, you can add a method for custom validation if needed
+        public bool IsValid()
+        {
+            return UserTelegramID > 0 && !string.IsNullOrEmpty(UserNameProfile);
+        }
     }
 }
