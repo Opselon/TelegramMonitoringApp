@@ -4,10 +4,26 @@ using System.Threading.Tasks;
 
 namespace CustomerMonitoringApp.Domain.Interfaces
 {
+
+
     public interface ICallHistoryImportService
     {
-        // Updated method to accept CancellationToken for better control over async tasks
-        // Added fileName parameter to ensure that file name can be passed directly to the service
+
+
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="filePath"></param>
+        /// <param name="fileName"></param>
+        /// <param name="cancellationToken"></param>
+        /// <returns></returns>
         Task ProcessExcelFileAsync(string filePath, string fileName, CancellationToken cancellationToken = default);
+
+
+
     }
+
+
+
 }

@@ -1,6 +1,8 @@
 ﻿using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using CustomerMonitoringApp.Domain.Entities;
 using CustomerMonitoringApp.Domain.Interfaces;
 using CustomerMonitoringApp.Domain.Views;
@@ -15,6 +17,10 @@ using Polly.CircuitBreaker;
 using Polly.Retry;
 using Polly.Timeout;
 using Serilog;
+using Dapper;
+using System.Data.SqlClient;
+using CustomerMonitoringApp.Application.DTOs;
+
 
 namespace CustomerMonitoringApp.Infrastructure.Repositories;
 
@@ -25,6 +31,8 @@ public class CallHistoryRepository : ICallHistoryRepository
     private readonly AppDbContext _context;
     private readonly ILogger<CallHistoryRepository> _logger;
     private readonly AsyncRetryPolicy _retryPolicy;
+
+    private readonly string _connectionString;
     private readonly AsyncTimeoutPolicy _timeoutPolicy;
 
     public CallHistoryRepository(AppDbContext context, ILogger<CallHistoryRepository> logger,
@@ -42,10 +50,23 @@ public class CallHistoryRepository : ICallHistoryRepository
         _circuitBreakerPolicy = Policy
             .Handle<Exception>()
             .CircuitBreakerAsync(5, TimeSpan.FromMinutes(1)); // Break circuit after 5 consecutive failures
-
+        _connectionString = "Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True";
         // Define timeout policy
         _timeoutPolicy = Policy
-            .TimeoutAsync(TimeSpan.FromSeconds(600)); // Timeout after 30 seconds
+            .TimeoutAsync(TimeSpan.FromSeconds(6000)); // Timeout after 30 seconds
+    }
+
+    public async Task<int> GetCallHistoryCountByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken)
+    {
+        return await _context.CallHistories
+            .Where(c => c.SourcePhoneNumber == phoneNumber || c.DestinationPhoneNumber == phoneNumber)
+            .CountAsync(cancellationToken);
+    }
+
+    public async Task<int> GetTotalCallHistoryCountAsync(CancellationToken cancellationToken)
+    {
+        return await _context.CallHistories
+            .CountAsync(cancellationToken);
     }
 
 
@@ -86,6 +107,19 @@ public class CallHistoryRepository : ICallHistoryRepository
         }
     }
 
+    public async Task<List<CallHistory>> GetCallHistoryByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken)
+    {
+        return await _context.CallHistories
+            .Where(c => c.SourcePhoneNumber == phoneNumber || c.DestinationPhoneNumber == phoneNumber)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<List<CallHistory>> GetAllCallHistoryAsync(CancellationToken cancellationToken)
+    {
+        return await _context.CallHistories.ToListAsync(cancellationToken);
+    }
+
+    
 
     /// <summary>
     ///     Commits the transaction and logs relevant details.
@@ -202,6 +236,12 @@ public class CallHistoryRepository : ICallHistoryRepository
                         foreach (DataColumn column in dataTable.Columns)
                             sqlBulkCopy.ColumnMappings.Add(column.ColumnName, column.ColumnName);
 
+                        // Ensure FileName field fits within the database column size
+                        foreach (DataRow row in dataTable.Rows)
+                        {
+                            row["FileName"] = TrimToMaxLength(row["FileName"].ToString(), 20); // Adjust the length
+                        }
+
                         // Divide data into batches for processing in parallel
                         var totalRows = dataTable.Rows.Count;
                         var batches = Enumerable.Range(0, (int)Math.Ceiling((double)totalRows / batchSize))
@@ -250,11 +290,18 @@ public class CallHistoryRepository : ICallHistoryRepository
             throw; // Re-throw to allow upper layers to handle the exception
         }
     }
+    private string TrimToMaxLength(string input, int maxLength)
+    {
+        if (string.IsNullOrEmpty(input))
+            return input;
+
+        // Trim or return the string within the maxLength limit
+        return input.Length > maxLength ? input.Substring(0, maxLength) : input;
+    }
 
 
     /// <summary>
-    ///     Retrieves and processes user details based on the provided phone number, with policies for retry, timeout, and
-    ///     circuit breaking.
+    /// Retrieves and processes user details based on the provided phone number, with policies for retry, timeout, and circuit breaking.
     /// </summary>
     /// <param name="phoneNumber">The phone number associated with the user to retrieve and process.</param>
     /// <returns>A task representing the asynchronous operation, containing the user details or null if not found.</returns>
@@ -263,85 +310,214 @@ public class CallHistoryRepository : ICallHistoryRepository
         // Step 1: Input Validation
         if (string.IsNullOrWhiteSpace(phoneNumber))
         {
-            // Log warning if phone number is invalid
             _logger.LogWarning("Invalid phone number provided; cannot retrieve user details.");
             return null;
         }
 
         try
         {
-            // Step 2: Log the start of the operation
-            _logger.LogInformation($"Starting user details retrieval for phone number: {phoneNumber}");
+            // Normalize phone number before querying
+            phoneNumber = NormalizePhoneNumber(phoneNumber);
 
-            // Step 3: Resilient Database Query (Retry, Timeout, Circuit Breaker)
+            _logger.LogInformation("Starting user details retrieval for phone number: {PhoneNumber}", phoneNumber);
+
+            // Step 2: Resilient Database Query (Retry, Timeout, Circuit Breaker)
             return await _retryPolicy.ExecuteAsync(async () =>
                 await _timeoutPolicy.ExecuteAsync(async () =>
                     await _circuitBreakerPolicy.ExecuteAsync(async () =>
                     {
-                        // Step 4: Perform the database query to retrieve the user by phone number
-                        var user = await _context.Users
-                            .Where(u => u.UserNumberFile == phoneNumber)
-                            .FirstOrDefaultAsync();
-
-                        // Step 5: Process the result of the query
-                        if (user == null)
+                        // Use Dapper to query the database
+                        using (var connection = new SqlConnection("Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True"))
                         {
-                            // Log if no user found
-                            _logger.LogWarning($"No user found for phone number: {phoneNumber}");
-                            return null; // User not found, returning null
+                            // Open connection
+                            await connection.OpenAsync();
+
+                            // Define the query
+                            string query = @"
+                            SELECT * 
+                            FROM Users 
+                            WHERE UserNumberFile = @PhoneNumber";
+
+                            // Execute the query
+                            var user = await connection.QueryFirstOrDefaultAsync<User>(query, new { PhoneNumber = phoneNumber });
+
+                            // Check if user was found
+                            if (user == null)
+                            {
+                                _logger.LogWarning("No user found for phone number: {PhoneNumber}", phoneNumber);
+                                return null;
+                            }
+
+                            _logger.LogInformation("User found for phone number: {PhoneNumber}. Processing details.", phoneNumber);
+
+                            // Additional processing (if needed)
+                            ProcessUserDetails(user);
+
+                            return user;
                         }
-
-                        // Log additional information if user is found
-                        _logger.LogInformation($"User found for phone number {phoneNumber}. Processing details.");
-
-                        // Step 6: Additional processing or logging (if needed)
-                        _logger.LogInformation($"Processing user details for: {user.UserNumberFile}");
-
-                        // Insert custom processing logic here (e.g., notifications, further updates, etc.)
-
-                        return user; // Return the user if found and processed successfully
                     })
                 )
             );
         }
         catch (BrokenCircuitException ex)
         {
-            // Step 7: Handle circuit breaker open
-            _logger.LogError(ex, "Circuit breaker is open; operation halted due to repeated failures.");
+            _logger.LogError(ex, "Circuit breaker is open; operation halted for phone number: {PhoneNumber}", phoneNumber);
             return null;
         }
         catch (OperationCanceledException ex)
         {
-            // Step 8: Handle cancellation (e.g., timeout or cancellation token)
-            _logger.LogWarning(ex, "Operation was canceled during user details retrieval.");
+            _logger.LogWarning(ex, "Operation was canceled while retrieving user details for phone number: {PhoneNumber}", phoneNumber);
             return null;
         }
         catch (SqlException ex)
         {
-            // Step 9: Handle database-specific issues (e.g., connection issues)
-            _logger.LogError(ex,
-                "Database error occurred while retrieving user details for phone number: {PhoneNumber}", phoneNumber);
+            _logger.LogError(ex, "Database error while retrieving user details for phone number: {PhoneNumber}", phoneNumber);
             return null;
         }
         catch (TimeoutException ex)
         {
-            // Step 10: Handle timeout-specific errors
-            _logger.LogError(ex, "Timeout occurred while retrieving user details for phone number: {PhoneNumber}",
-                phoneNumber);
+            _logger.LogError(ex, "Timeout occurred while retrieving user details for phone number: {PhoneNumber}", phoneNumber);
             return null;
         }
         catch (Exception ex)
         {
-            // Step 11: Handle any other unexpected errors
-            _logger.LogError(ex,
-                "Unexpected error occurred while retrieving user details for phone number: {PhoneNumber}", phoneNumber);
-            throw; // Rethrow for higher-level handling if necessary
+            _logger.LogError(ex, "Unexpected error while retrieving user details for phone number: {PhoneNumber}", phoneNumber);
+            throw; // Re-throw for higher-level handling
         }
     }
 
 
+
+    /// <summary>
+    /// Retrieves the total call count for a given phone number.
+    /// </summary>
+    /// <param name="phoneNumber">The phone number to search for.</param>
+    /// <returns>The total count of calls for the phone number.</returns>
+    public async Task<int> GetCallCountByPhoneNumberAsync(string phoneNumber)
+    {
+        using var connection = new SqlConnection(_connectionString);
+
+        const string query = @"
+            SELECT COUNT(*) 
+            FROM CallHistory
+            WHERE CallerNumber = @PhoneNumber OR ReceiverNumber = @PhoneNumber";
+
+        return await connection.ExecuteScalarAsync<int>(query, new { PhoneNumber = phoneNumber });
+    }
+
+    /// <summary>
+    /// Retrieves the total message count for a given phone number.
+    /// </summary>
+    /// <param name="phoneNumber">The phone number to search for.</param>
+    /// <returns>The total count of messages for the phone number.</returns>
+    public async Task<int> GetMessageCountByPhoneNumberAsync(string phoneNumber)
+    {
+        using var connection = new SqlConnection(_connectionString);
+
+        const string query = @"
+            SELECT COUNT(*) 
+            FROM MessageHistory
+            WHERE SenderNumber = @PhoneNumber OR ReceiverNumber = @PhoneNumber";
+
+        return await connection.ExecuteScalarAsync<int>(query, new { PhoneNumber = phoneNumber });
+    }
+
+
+
+private async Task<User?> QueryUserAsync(string phoneNumber)
+    {
+        _logger.LogInformation("Executing primary query for phone number: {PhoneNumber}", phoneNumber);
+        var user = await _context.Users
+            .Where(u => u.UserNumberFile == phoneNumber)
+            .FirstOrDefaultAsync();
+
+        if (user != null)
+        {
+            _logger.LogInformation("Primary query succeeded. UserId: {UserId}, PhoneNumber: {UserNumberFile}",
+                user.UserId, user.UserNumberFile);
+        }
+        else
+        {
+            _logger.LogWarning("Primary query returned no results for phone number: {PhoneNumber}", phoneNumber);
+        }
+
+        return user;
+    }
+    private async Task<User?> FallbackQueryUserAsync(string phoneNumber)
+    {
+        return await _context.Users
+            .Where(u => EF.Functions.Like(u.UserNumberFile, $"%{phoneNumber}%"))
+            .FirstOrDefaultAsync();
+    }
+
+
+
+    /// Diagnoses query problems by attempting to retrieve a single user with a closely matching phone number.
+    /// Logs details about the diagnosis.
+    /// </summary>
+    /// <param name="phoneNumber">The phone number to diagnose against.</param>
+    /// <returns>A task representing the asynchronous operation, containing the closest matching user or null if none found.</returns>
+    private async Task<User?> DiagnoseDatabaseIssuesAsync(string phoneNumber)
+    {
+        try
+        {
+            _logger.LogInformation("Starting diagnostic check for phone number: {PhoneNumber}", phoneNumber);
+
+            // Example: Attempt to find a user with a loosely matching phone number
+            var similarUser = await _context.Users
+                .Where(u => EF.Functions.Like(u.UserNumberFile, $"%{phoneNumber}%"))
+                .FirstOrDefaultAsync();
+
+            if (similarUser != null)
+            {
+                _logger.LogInformation(
+                    "Diagnostic result: Found a similar user. Id: {UserId}, Number: {UserNumberFile}",
+                    similarUser.UserId,
+                    similarUser.UserNumberFile);
+            }
+            else
+            {
+                _logger.LogWarning("Diagnostic result: No similar user found for phone number: {PhoneNumber}", phoneNumber);
+            }
+
+            return similarUser;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error occurred during database diagnostic for phone number: {PhoneNumber}", phoneNumber);
+            return null;
+        }
+    }
+
+
+    /// <summary>
+    /// Processes additional logic for the retrieved user details.
+    /// </summary>
+    /// <param name="user">The user to process.</param>
+    private void ProcessUserDetails(User user)
+    {
+        _logger.LogInformation("Processing user details for: {UserId}", user.UserId);
+
+        // Example: Trigger notifications, update last access, etc.
+        // Custom logic goes here
+    }
+
+    /// <summary>
+    /// Normalizes the phone number to a consistent format for database queries.
+    /// </summary>
+    private string NormalizePhoneNumber(string phoneNumber)
+    {
+        // Example: Convert '98XXXXXXXXXX' to '09XXXXXXXXX'
+        if (phoneNumber.StartsWith("98"))
+        {
+            phoneNumber = "0" + phoneNumber.Substring(2);
+        }
+
+        return phoneNumber;
+    }
+
     // Helper method to parse Persian date strings to DateTime
-    private DateTime ParsePersianDate(string persianDate)
+        private DateTime ParsePersianDate(string persianDate)
     {
         // Default result if the date is invalid
         var defaultDate = DateTime.MinValue; // Or you could use DateTime.Today, based on your preference
@@ -464,11 +640,288 @@ public class CallHistoryRepository : ICallHistoryRepository
         return results;
     }
 
+    // This method enqueues the job for background execution
+    public void GetEnhancedUserStatisticsWithPartnersInBackground(string phoneNumber, int topCount = 1)
+    {
+        // Enqueue the job to execute GetEnhancedUserStatisticsWithPartnersAsync in the background
+        _backgroundJobClient.Enqueue(() => GetEnhancedUserStatisticsWithPartnersAsync(phoneNumber, topCount));
+    }
+
+    public async Task<IEnumerable<UserCallSmsStatistics>> GetEnhancedUserStatisticsWithPartnersAsync(string phoneNumber ,int topCount = 1)
+{
+    try
+    {
+
+        string query = @"
+WITH CallStatistics AS (
+    SELECT
+        u.UserNumberFile AS PhoneNumber,
+        COALESCE(u.UserNameFile, 'Not Available') AS FirstName,
+        COALESCE(u.UserFamilyFile, 'Not Available') AS LastName,
+        COALESCE(u.UserFatherNameFile, 'Not Available') AS FatherName,
+        COALESCE(u.UserBirthDayFile, 'Not Available') AS BirthDate,
+        COALESCE(u.UserAddressFile, 'Not Available') AS Address,
+        COALESCE(u.UserSourceFile, 'Not Available') AS UserSourceFile,
+        COUNT(CASE WHEN c.CallType = N'تماس صوتی' THEN 1 END) AS TotalCalls,
+        COUNT(CASE WHEN c.CallType = N'پیام کوتاه' THEN 1 END) AS TotalSMS,
+        SUM(CASE WHEN c.CallType = N'تماس صوتی' THEN c.Duration ELSE 0 END) AS TotalCallDuration
+    FROM dbo.Users u
+    LEFT JOIN dbo.CallHistories c
+        ON u.UserNumberFile IN (c.SourcePhoneNumber, c.DestinationPhoneNumber)
+    GROUP BY
+        u.UserNumberFile,
+        u.UserNameFile,
+        u.UserFamilyFile,
+        u.UserFatherNameFile,
+        u.UserBirthDayFile,
+        u.UserAddressFile,
+        u.UserSourceFile
+),
+FileAggregates AS (
+    SELECT 
+        c.FileName,
+        u.UserNumberFile AS PhoneNumber,
+        COUNT(DISTINCT c.CallID) AS TotalOccurrences
+    FROM dbo.CallHistories c
+    JOIN dbo.Users u
+        ON u.UserNumberFile IN (c.SourcePhoneNumber, c.DestinationPhoneNumber)
+    WHERE u.UserNumberFile = @PhoneNumber
+    GROUP BY c.FileName, u.UserNumberFile
+),
+PartnerStatistics AS (
+    SELECT
+        CASE 
+            WHEN c.SourcePhoneNumber = @PhoneNumber THEN c.DestinationPhoneNumber
+            ELSE c.SourcePhoneNumber
+        END AS PartnerPhoneNumber,
+        SUM(CASE WHEN c.CallType = N'تماس صوتی' THEN c.Duration ELSE 0 END) AS TotalDuration,
+        COUNT(*) AS TotalInteractions
+    FROM dbo.CallHistories c
+    WHERE c.SourcePhoneNumber = @PhoneNumber OR c.DestinationPhoneNumber = @PhoneNumber
+    GROUP BY CASE 
+                 WHEN c.SourcePhoneNumber = @PhoneNumber THEN c.DestinationPhoneNumber
+                 ELSE c.SourcePhoneNumber
+             END
+),
+RankedPartners AS (
+    SELECT
+        ps.PartnerPhoneNumber,
+        ps.TotalDuration,
+        ps.TotalInteractions,
+        RANK() OVER (ORDER BY ps.TotalDuration DESC) AS PartnerRank
+    FROM PartnerStatistics ps
+),
+PartnerRanges AS (
+    SELECT 
+        rp.PartnerRank, 
+        rp.PartnerPhoneNumber, 
+        rp.TotalDuration
+    FROM RankedPartners rp
+)
+SELECT TOP (@TopCount)
+    cs.PhoneNumber,
+    cs.FirstName,
+    cs.LastName,
+    cs.FatherName,
+    cs.BirthDate,
+    cs.Address,
+    cs.UserSourceFile,
+    STRING_AGG(df.FileName + ' (' + CAST(df.TotalOccurrences AS VARCHAR) + ' times)', ', ') AS FileNames,
+    cs.TotalCalls,
+    cs.TotalSMS,
+    cs.TotalCallDuration,
+    (SELECT STRING_AGG(rp.PartnerPhoneNumber + ' (' + CAST(rp.TotalDuration AS VARCHAR) + 's)', ', ') 
+     FROM PartnerRanges rp WHERE rp.PartnerRank BETWEEN 1 AND 5) AS FrequentPartners1,
+    (SELECT STRING_AGG(rp.PartnerPhoneNumber + ' (' + CAST(rp.TotalDuration AS VARCHAR) + 's)', ', ') 
+     FROM PartnerRanges rp WHERE rp.PartnerRank BETWEEN 6 AND 10) AS FrequentPartners2,
+    (SELECT STRING_AGG(rp.PartnerPhoneNumber + ' (' + CAST(rp.TotalDuration AS VARCHAR) + 's)', ', ') 
+     FROM PartnerRanges rp WHERE rp.PartnerRank BETWEEN 11 AND 15) AS FrequentPartners3,
+    (SELECT STRING_AGG(rp.PartnerPhoneNumber + ' (' + CAST(rp.TotalDuration AS VARCHAR) + 's)', ', ') 
+     FROM PartnerRanges rp WHERE rp.PartnerRank BETWEEN 16 AND 20) AS FrequentPartners4
+FROM CallStatistics cs
+LEFT JOIN FileAggregates df 
+    ON df.PhoneNumber = cs.PhoneNumber
+WHERE cs.PhoneNumber = @PhoneNumber
+GROUP BY 
+    cs.PhoneNumber, 
+    cs.FirstName, 
+    cs.LastName, 
+    cs.FatherName, 
+    cs.BirthDate, 
+    cs.Address, 
+    cs.UserSourceFile,
+    cs.TotalCalls, 
+    cs.TotalSMS, 
+    cs.TotalCallDuration
+ORDER BY cs.TotalCalls + cs.TotalSMS DESC;
+";
+
+        using (var connection =
+               new SqlConnection("Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True"))
+        {
+            await connection.OpenAsync();
+
+            var parameters = new { PhoneNumber = phoneNumber, TopCount = topCount };
+
+            // Execute the query and get results using Dapper
+            var result = await connection.QueryAsync(query, parameters);
+
+            // Map the results to the UserCallSmsStatistics class
+            var userStatistics = result.Select(row => new UserCallSmsStatistics
+            {
+                PhoneNumber = row.PhoneNumber ?? "Not Available", // Set default if null
+                FirstName = string.IsNullOrWhiteSpace(row.FirstName) ? "Not Available" : row.FirstName,
+                LastName = string.IsNullOrWhiteSpace(row.LastName) ? "Not Available" : row.LastName,
+                FatherName = string.IsNullOrWhiteSpace(row.FatherName) ? "Not Available" : row.FatherName,
+                BirthDate = string.IsNullOrWhiteSpace(row.BirthDate) ? "Not Available" : row.BirthDate,
+                Address = string.IsNullOrWhiteSpace(row.Address) ? "Not Available" : row.Address,
+                UserSourceFiles = string.IsNullOrWhiteSpace(row.UserSourceFile) ? "Not Available" : row.UserSourceFile,
+                FileNames = string.IsNullOrWhiteSpace(row.FileNames) ? "Not Available" : row.FileNames,
+                TotalCalls = row.TotalCalls ?? 0, // Set to 0 if null
+                TotalSMS = row.TotalSMS ?? 0, // Set to 0 if null
+                TotalCallDuration = row.TotalCallDuration ?? 0, // Set to 0 if null
+                FrequentPartners1 = string.IsNullOrWhiteSpace(row.FrequentPartners1)
+                    ? "Not Available"
+                    : row.FrequentPartners1,
+                FrequentPartners2 = string.IsNullOrWhiteSpace(row.FrequentPartners2)
+                    ? "Not Available"
+                    : row.FrequentPartners2,
+                FrequentPartners3 = string.IsNullOrWhiteSpace(row.FrequentPartners3)
+                    ? "Not Available"
+                    : row.FrequentPartners3,
+                FrequentPartners4 = string.IsNullOrWhiteSpace(row.FrequentPartners4)
+                    ? "Not Available"
+                    : row.FrequentPartners4
+            }).ToList();
+            // You can now use the userStatistics list, where null or empty values have been replaced with default
+
+
+            // Apply default values to properties if they are null
+            userStatistics.ForEach(u => u.SetDefaultsIfNeeded());
+
+            return userStatistics;
+        }
+    }
+
+
+    catch (SqlException ex)
+    {
+        _logger.LogError(ex, "SQL exception occurred while fetching user statistics.");
+        throw new InvalidOperationException("A database error occurred while fetching user statistics.", ex);
+    }
+    catch (TimeoutException ex)
+    {
+        _logger.LogError(ex, "Query timed out while fetching user statistics.");
+        throw new InvalidOperationException("The database query timed out. Please try again later.", ex);
+    }
+    catch (UnauthorizedAccessException ex)
+    {
+        _logger.LogError(ex, "Unauthorized access while fetching user statistics.");
+        throw new InvalidOperationException("You do not have permission to access the database.", ex);
+    }
+    catch (InvalidOperationException ex)
+    {
+        _logger.LogError(ex, "Invalid operation occurred while fetching user statistics.");
+        throw new InvalidOperationException("An invalid operation occurred while processing your request.", ex);
+    }
+    catch (ArgumentNullException ex)
+    {
+        _logger.LogError(ex, "A required argument was null while fetching user statistics.");
+        throw new InvalidOperationException("A required parameter was missing or invalid.", ex);
+    }
+    catch (ArgumentException ex)
+    {
+        _logger.LogError(ex, "An invalid argument was provided while fetching user statistics.");
+        throw new InvalidOperationException("One of the provided arguments was invalid.", ex);
+    }
+    catch (FormatException ex)
+    {
+        _logger.LogError(ex, "A format exception occurred while parsing user statistics.");
+        throw new InvalidOperationException("There was an error in data formatting while fetching user statistics.",
+            ex);
+    }
+
+    catch (InvalidCastException ex)
+    {
+        _logger.LogError(ex, "A casting error occurred while processing user statistics.");
+        throw new InvalidOperationException("An error occurred while processing the data retrieved from the database.",
+            ex);
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "An unexpected error occurred while fetching user statistics.");
+        throw new InvalidOperationException("An unexpected error occurred. Please try again later.", ex);
+    }
+}
+
 
     /// <summary>
-    ///     Retrieves long calls for a specific phone number that exceed a specified duration.
+    /// Retrieves the user details for the user with the most calls and their SMS count.
     /// </summary>
-    public async Task<List<CallHistory>> GetLongCallsByPhoneNumberAsync(string phoneNumber,
+    /// <returns>A tuple containing user details, total call count, and total SMS count.</returns>
+    public async Task<(User? User, int TotalCalls, int TotalSMS)> GetUserWithMostCallsAsync()
+    {
+        using var connection = new SqlConnection(_connectionString);
+
+        // SQL to identify the user with the most calls
+        const string mostCallsQuery = @"
+            SELECT TOP 1 
+                UserDetails.UserNumberFile, 
+                UserDetails.UserNameFile, 
+                UserDetails.UserFamilyFile, 
+                UserDetails.UserFatherNameFile,
+                UserDetails.UserBirthDayFile, 
+                UserDetails.UserAddressFile, 
+                UserDetails.UserTelegramID, 
+                UserDetails.UserDescriptionFile,
+                UserDetails.UserSourceFile, 
+                UserDetails.UserId,
+                COUNT(*) AS TotalCalls
+            FROM CallHistory
+            JOIN UserDetails ON 
+                CallHistory.CallerNumber = UserDetails.UserNumberFile 
+                OR CallHistory.ReceiverNumber = UserDetails.UserNumberFile
+            GROUP BY 
+                UserDetails.UserNumberFile, 
+                UserDetails.UserNameFile, 
+                UserDetails.UserFamilyFile, 
+                UserDetails.UserFatherNameFile,
+                UserDetails.UserBirthDayFile, 
+                UserDetails.UserAddressFile, 
+                UserDetails.UserTelegramID, 
+                UserDetails.UserDescriptionFile,
+                UserDetails.UserSourceFile, 
+                UserDetails.UserId
+            ORDER BY COUNT(*) DESC";
+
+        // Fetch the user with the most calls
+        var userWithMostCalls = await connection.QueryFirstOrDefaultAsync<(User User, int TotalCalls)>(
+            mostCallsQuery);
+
+        if (userWithMostCalls.User == null)
+        {
+            // No user found
+            return (null, 0, 0);
+        }
+
+        // Fetch the SMS count for the identified user
+        const string smsCountQuery = @"
+            SELECT COUNT(*)
+            FROM MessageHistory
+            WHERE SenderNumber = @PhoneNumber OR ReceiverNumber = @PhoneNumber";
+
+        var totalSMS = await connection.ExecuteScalarAsync<int>(
+            smsCountQuery,
+            new { PhoneNumber = userWithMostCalls.User.UserNumberFile });
+
+        return (userWithMostCalls.User, userWithMostCalls.TotalCalls, totalSMS);
+    }
+
+
+/// <summary>
+///     Retrieves long calls for a specific phone number that exceed a specified duration.
+/// </summary>
+public async Task<List<CallHistory>> GetLongCallsByPhoneNumberAsync(string phoneNumber,
         int minimumDurationInSeconds)
     {
         return await _context.CallHistories
@@ -873,112 +1326,87 @@ public class CallHistoryRepository : ICallHistoryRepository
         return optimalBatchSize;
     }
 
-
-
-    public async Task<List<CallHistoryWithUserNames>> GetCallsWithUserNamesAsync(string phoneNumber,
-        CancellationToken cancellationToken)
+    public async IAsyncEnumerable<CallHistoryWithUserNames> GetCallsWithUserNamesStreamAsync(
+      string phoneNumber,
+      [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        var results = new ConcurrentBag<CallHistoryWithUserNames>();
+        // Constants for batch control
+        const int initialBatchSize = 5000;
+        const int maxBatchSize = 2000;
+        const int minBatchSize = 1000;
+        const long maxPartSizeInBytes = 50 * 1024 * 1024; // 50MB per batch
+
+        int currentBatchSize = initialBatchSize;
+        long currentBatchSizeInBytes = 0;
+
+        var results = new List<CallHistoryWithUserNames>(); // Collect results here
 
         try
         {
-            // Log the start of the operation
-            Console.WriteLine($"Starting GetCallsWithUserNamesAsync for phone number: {phoneNumber}");
-
-            // Validate inputs
-            if (string.IsNullOrWhiteSpace(phoneNumber))
-                throw new ArgumentException("Phone number cannot be null or empty.", nameof(phoneNumber));
-
-            // Step 1: Get total rows
-            var totalRows = await _context.CallHistories
-                .Where(call => call.SourcePhoneNumber == phoneNumber || call.DestinationPhoneNumber == phoneNumber)
-                .CountAsync(cancellationToken);
-
-            if (totalRows == 0)
-            {
-                Console.WriteLine("No call histories found for the specified phone number.");
-                return new List<CallHistoryWithUserNames>();
-            }
-
-            // Step 2: Gather system resources
-            var availableMemoryMB =
-                (int)(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024)); // Memory in MB
-            var processorCount = Environment.ProcessorCount;
-
-            // Step 3: Calculate dynamic batch size
-            var dynamicBatchSize = CalculateBatchSize(totalRows, availableMemoryMB, processorCount);
-
-            Console.WriteLine($"Dynamic batch size calculated: {dynamicBatchSize}");
-
-            // Step 4: Prepare batch indices
-            var batchIndices = Enumerable.Range(0, (int)Math.Ceiling((double)totalRows / dynamicBatchSize));
-
-            // Step 5: Process batches using Parallel.ForEachAsync
-            await Parallel.ForEachAsync(batchIndices, new ParallelOptions
-                {
-                    MaxDegreeOfParallelism = processorCount, // Concurrency based on available CPUs
-                    CancellationToken = cancellationToken
-                },
-                async (batchIndex, token) =>
-                {
-                    var startRow = batchIndex * dynamicBatchSize;
-
-                    try
+            // Execute within retry and timeout policies
+            await _retryPolicy.ExecuteAsync(async () =>
+                await _timeoutPolicy.ExecuteAsync(async () =>
+                    await _circuitBreakerPolicy.ExecuteAsync(async () =>
                     {
-                        // Execute database query with retry policies
-                        var batchResults = await _retryPolicy.ExecuteAsync(async () =>
-                            await _timeoutPolicy.ExecuteAsync(async () =>
-                                await _circuitBreakerPolicy.ExecuteAsync(async () =>
-                                {
-                                    var query = from call in _context.CallHistories
-                                        where call.SourcePhoneNumber == phoneNumber ||
-                                              call.DestinationPhoneNumber == phoneNumber
-                                        join caller in _context.Users on call.SourcePhoneNumber equals caller
-                                            .UserNumberFile into callerInfo
-                                        from callerData in callerInfo.DefaultIfEmpty()
-                                        join receiver in _context.Users on call.DestinationPhoneNumber equals receiver
-                                            .UserNumberFile into receiverInfo
-                                        from receiverData in receiverInfo.DefaultIfEmpty()
-                                        orderby call.CallDateTime
-                                        select new CallHistoryWithUserNames
-                                        {
-                                            CallId = call.CallId,
-                                            SourcePhoneNumber = call.SourcePhoneNumber,
-                                            DestinationPhoneNumber = call.DestinationPhoneNumber,
-                                            CallDateTime = call.CallDateTime,
-                                            Duration = call.Duration,
-                                            CallType = call.CallType,
-                                            FileName = call.FileName,
-                                            CallerName = callerData != null
-                                                ? $"{callerData.UserNameFile} {callerData.UserFamilyFile} {callerData.UserAddressFile} {callerData.UserFatherNameFile}"
-                                                : string.Empty,
-                                            ReceiverName = receiverData != null
-                                                ? $"{receiverData.UserNameFile} {receiverData.UserFamilyFile} {receiverData.UserAddressFile} {receiverData.UserFatherNameFile}"
-                                                : string.Empty
-                                        };
+                        var query = from call in _context.CallHistories
+                                    where call.SourcePhoneNumber == phoneNumber || call.DestinationPhoneNumber == phoneNumber
+                                    join caller in _context.Users on call.SourcePhoneNumber equals caller.UserNumberFile into callerInfo
+                                    from callerData in callerInfo.DefaultIfEmpty()
+                                    join receiver in _context.Users on call.DestinationPhoneNumber equals receiver.UserNumberFile into receiverInfo
+                                    from receiverData in receiverInfo.DefaultIfEmpty()
+                                    select new CallHistoryWithUserNames
+                                    {
+                                        CallId = call.CallId,
+                                        SourcePhoneNumber = call.SourcePhoneNumber,
+                                        DestinationPhoneNumber = call.DestinationPhoneNumber,
+                                        CallDateTime = call.CallDateTime,
+                                        Duration = call.Duration,
+                                        CallType = call.CallType,
+                                        FileName = call.FileName,
+                                        CallerName = callerData != null
+                                            ? $"{callerData.UserNameFile} {callerData.UserFamilyFile} {callerData.UserAddressFile} {callerData.UserFatherNameFile}"
+                                            : "Unknown",
+                                        ReceiverName = receiverData != null
+                                            ? $"{receiverData.UserNameFile} {receiverData.UserFamilyFile} {receiverData.UserAddressFile} {receiverData.UserFatherNameFile}"
+                                            : "Unknown"
+                                    };
 
-                                    // Retrieve the current batch of results
-                                    return await query.Skip(startRow).Take(dynamicBatchSize).ToListAsync(token);
-                                })
-                            )
-                        );
+                        var distinctQuery = query
+                            .AsNoTrackingWithIdentityResolution() // Optimizes tracking for queries with joins
+                            .Distinct()
+                            .AsSplitQuery() // Executes each join as a separate query to reduce database complexity for large datasets
+                            .AsAsyncEnumerable();
 
-                        // Add batch results to the main list directly in the parallel loop
-                        batchResults.ForEach(result => results.Add(result));
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error processing batch {batchIndex + 1}: {ex.Message}");
-                    }
-                });
+                        var currentBatch = new List<CallHistoryWithUserNames>();
 
+                        // Process query results
+                        await foreach (var record in distinctQuery.WithCancellation(cancellationToken))
+                        {
+                            currentBatch.Add(record);
+                            currentBatchSizeInBytes += EstimateBatchSize(new List<CallHistoryWithUserNames> { record });
 
-            Console.WriteLine("Completed processing all batches.");
-            return results.ToList();
+                            if (currentBatchSizeInBytes >= maxPartSizeInBytes || currentBatch.Count >= currentBatchSize)
+                            {
+                                results.AddRange(currentBatch);
+                                currentBatch.Clear();
+                                currentBatchSizeInBytes = 0;
+
+                                currentBatchSize = Math.Min(Math.Max(minBatchSize, currentBatchSize * 2), maxBatchSize);
+                                await Task.Yield();
+                            }
+                        }
+
+                        if (currentBatch.Any())
+                        {
+                            results.AddRange(currentBatch);
+                        }
+                    })
+                )
+            );
         }
         catch (BrokenCircuitException)
         {
-            Console.WriteLine("Circuit breaker is open. Too many errors occurred.");
+            Console.WriteLine("Operation stopped due to too many errors. Circuit breaker is open.");
         }
         catch (OperationCanceledException)
         {
@@ -986,14 +1414,121 @@ public class CallHistoryRepository : ICallHistoryRepository
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Unexpected error: {ex.Message}");
+            Console.WriteLine($"Error in GetCallsWithUserNamesStreamAsync: {ex.Message}");
+            throw; // Rethrow for higher-level handling
         }
 
-        // Return an empty list if something goes wrong
-        return new List<CallHistoryWithUserNames>();
+        // Use a separate loop to yield results
+        foreach (var result in results)
+        {
+            yield return result;
+        }
     }
 
+
+
+    private async Task WriteBatchToDatabaseAsync(List<CallHistoryWithUserNames> batch)
+    {
+        if (batch == null || !batch.Any()) return;
+
+    }
+
+
+    // This is an estimate of the data size (in bytes) for each batch
+    private long EstimateBatchSize(List<CallHistoryWithUserNames> batch)
+    {
+        long totalSize = 0;
+
+        foreach (var record in batch)
+        {
+            // Approximate the size of a record based on typical string lengths
+            totalSize += record.CallId.ToString().Length; // CallId as string
+            totalSize += record.SourcePhoneNumber.Length; // SourcePhoneNumber
+            totalSize += record.DestinationPhoneNumber.Length; // DestinationPhoneNumber
+            totalSize += record.CallDateTime.ToString().Length; // CallDateTime
+            totalSize += record.Duration.ToString().Length; // Duration
+            totalSize += record.CallType.Length; // CallType
+            totalSize += record.FileName.Length; // FileName
+            totalSize += record.CallerName.Length; // CallerNameCallHistoryWithUserNamesCallHistoryWithUserNames
+            totalSize += record.ReceiverName.Length; // ReceiverName
+        }
+
+        return totalSize;
+    }
+
+
+    public async Task<int> GetCallHistoryCountAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            // استفاده از ترکیب سیاست‌های Polly (Retry, Timeout, Circuit Breaker)
+            return await _retryPolicy.ExecuteAsync(async () =>
+                await _timeoutPolicy.ExecuteAsync(async () =>
+                    await _circuitBreakerPolicy.ExecuteAsync(async () =>
+                    {
+                        // دریافت تعداد رکوردها از دیتابیس به صورت غیرهمزمان
+                        return await _context.CallHistories.CountAsync(cancellationToken);
+                    })
+                )
+            );
+        }
+        catch (TimeoutRejectedException ex)
+        {
+            // مدیریت خطا در صورتی که عملیات timeout شود
+            throw new ApplicationException("The operation timed out while retrieving call history count.", ex);
+        }
+        catch (BrokenCircuitException ex)
+        {
+            // مدیریت خطا در صورتی که circuit breaker فعال شود
+            throw new ApplicationException("Circuit breaker is open. The operation is temporarily unavailable.", ex);
+        }
+        catch (Exception ex)
+        {
+            // مدیریت سایر خطاها
+            throw new ApplicationException("Unexpected error occurred while retrieving call history count.", ex);
+        }
+    }
     #endregion
 
     #endregion
+
+}
+
+public static class BatchSizeConfig
+{
+    // Total available RAM in MB (for example, 6GB RAM = 6144MB)
+    public const int TotalRamInMB = 6144;  // This should be adjusted based on your system's RAM
+
+    // Available CPU cores (in this case, 4 cores)
+    public const int CpuCores = 4; // Number of CPU cores available for processing
+
+    // Calculate the initial batch size based on available RAM, CPU cores, and row count
+    public static int InitialBatchSize
+    {
+        get
+        {
+            // Estimate how many records fit in memory based on available RAM
+            // For simplicity, let's assume each record takes about 1KB (adjust as needed based on your record structure)
+            int recordSizeInKB = 1;  // Adjust based on actual record size (in KB)
+            int recordsPerMB = 1024 / recordSizeInKB;  // How many records fit in 1MB
+
+            // Maximum number of records that can be processed based on available RAM
+            int maxRecordsByRam = (TotalRamInMB / 2) * recordsPerMB; // Using half the RAM for the batch
+
+            // Adjust the batch size based on available CPU cores (in this case, splitting the task evenly across cores)
+            int maxRecordsByCpu = 100_000 * CpuCores; // Max batch size in terms of cores
+
+            // Choose the smaller of the two to optimize for both memory and CPU
+            return Math.Min(maxRecordsByRam, maxRecordsByCpu);
+        }
+    }
+
+    // The maximum batch size (in records) that should be processed for optimization
+    public const int MaxBatchSize = 500_000;  // This is the upper limit for batch size
+
+    // The minimum batch size (in records) to avoid processing too many small batches
+    public const int MinBatchSize = 10_000;  // This is the lower limit for batch size
+
+    // The maximum part size in bytes (50MB) to avoid large data transfers in a single batch
+    public const int MaxPartSizeInBytes = 50 * 1024 * 1024;  // 50MB
 }

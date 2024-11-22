@@ -104,7 +104,7 @@
                         <Button x:Name="StartBotButton" Content="Start Telegram Bot" Width="200" Height="50"
                                 FontSize="16" ToolTip="Start the Telegram bot for monitoring users." Click="StartBotButton_Click"/>
                        
-                            <RichTextBox x:Name="LogTextBox" Background="White" Foreground="Black" FontSize="14" IsReadOnly="True" BorderThickness="0" VerticalScrollBarVisibility="Visible" AcceptsReturn="True" Height="387"/>
+                            <RichTextBox x:Name="LogTextBox" Background="White" Foreground="Black" FontSize="14" IsReadOnly="True" BorderThickness="0" VerticalScrollBarVisibility="Visible" AcceptsReturn="True" Height="387" TextChanged="LogTextBox_TextChanged"/>
                     
                     </StackPanel>
                 </GroupBox>

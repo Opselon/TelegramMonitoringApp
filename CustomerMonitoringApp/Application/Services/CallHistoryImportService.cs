@@ -212,7 +212,7 @@ namespace CustomerMonitoringApp.Application.Services
                         }
 
                         // Parse individual row into a CallHistory record
-                        var record = await ParseRowAsync(worksheet, row);
+                        var record = await ParseRowAsync(worksheet, row,filePath);
                         if (record != null)
                         {
                             records.Add(record);
@@ -239,10 +239,7 @@ namespace CustomerMonitoringApp.Application.Services
             return records;
             #endregion
         }
-
-
-        // Method to parse a single row from Excel
-        private async Task<CallHistory> ParseRowAsync(ExcelWorksheet worksheet, int row)
+        private async Task<CallHistory> ParseRowAsync(ExcelWorksheet worksheet, int row, string path)
         {
             try
             {
@@ -254,40 +251,77 @@ namespace CustomerMonitoringApp.Application.Services
                 var durationText = worksheet.Cells[row, 5]?.Text?.Trim();
                 var callType = worksheet.Cells[row, 6]?.Text?.Trim();
 
-                // Skip the row if any mandatory field is missing or invalid
-                if (string.IsNullOrEmpty(sourcePhone) || string.IsNullOrEmpty(destinationPhone) ||
-                    string.IsNullOrEmpty(persianDate) || string.IsNullOrEmpty(callTime) ||
-                    string.IsNullOrEmpty(durationText) || string.IsNullOrEmpty(callType))
-                {
-                    _logger.LogWarning($"Row {row}: Missing required fields.");
-                    return null; // Skip row if any mandatory field is missing
-                }
-
-
-                // Validate and parse duration
                 if (!int.TryParse(durationText, out int duration) || duration < 0)
                 {
                     _logger.LogWarning($"Row {row}: Invalid call duration '{durationText}'.");
                     return null; // Skip row if duration is invalid
                 }
 
-                // Return the CallHistory record with the parsed data
+                // Trim and ensure the fields fit within the maximum length defined in the model
                 return new CallHistory
                 {
-                    SourcePhoneNumber = sourcePhone,
-                    DestinationPhoneNumber = destinationPhone,
-                    CallDateTime = persianDate + " | " + callTime, // Format for Persian date
+                    SourcePhoneNumber = TrimToMaxLength(sourcePhone, 13),
+                    DestinationPhoneNumber = TrimToMaxLength(destinationPhone, 13),
+                    CallDateTime = TrimToMaxLength($"{persianDate} | {callTime}", 20), // Format for Persian date
                     Duration = duration,
-                    CallType = callType ?? "Unknown"
+                    CallType = TrimToMaxLength(callType, 10),
+                    FileName = TrimToMaxLength(path, 20) // Trimming the file path to fit within the model constraint
                 };
+            }
+            catch (FormatException ex)
+            {
+                _logger.LogError($"Row {row}: Format error parsing data - {ex.Message}");
+                return null; // Return null for format errors
+            }
+            catch (ArgumentException ex)
+            {
+                _logger.LogError($"Row {row}: Argument error - {ex.Message}");
+                return null; // Return null for argument errors
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Error parsing row {row}: {ex.Message}");
-                return null; // Return null if any error occurs during parsing
+                _logger.LogError($"Row {row}: Unexpected error - {ex.Message}");
+                return null; // Return null if any other error occurs
             }
         }
 
+        // Helper method to trim the text to fit the specified length
+        private string TrimToMaxLength(string input, int maxLength)
+        {
+            if (string.IsNullOrEmpty(input))
+                return input;
+
+            return input.Length > maxLength ? input.Substring(0, maxLength) : input;
+        }
+        // Additional helper validation methods
+
+        private bool IsValidPhoneNumber(string phoneNumber)
+        {
+            // Add logic to validate phone number format (e.g., regex validation)
+            return !string.IsNullOrEmpty(phoneNumber) && phoneNumber.Length >= 10;
+        }
+
+        private bool IsValidPersianDate(string persianDate)
+        {
+            // Add logic to validate Persian date format, if necessary (e.g., check if the date matches a Persian date regex or format)
+            return !string.IsNullOrEmpty(persianDate); // Placeholder, implement as needed
+        }
+
+        private bool IsValidTimeFormat(string time)
+        {
+            // Add logic to validate time format, e.g., "HH:mm" format
+            return TimeSpan.TryParse(time, out _); // Placeholder for time validation
+        }
+
+        // Helper function to sanitize the text before saving
+        private string SanitizeText(string input)
+        {
+            if (string.IsNullOrEmpty(input))
+                return input;
+
+            // Replace any unwanted characters or do further sanitization (e.g., remove control characters, trim excessively long strings)
+            return new string(input.Where(c => !char.IsControl(c)).ToArray());
+        }
 
 
         public async Task SaveRecordsAsync(DataTable dataTable)

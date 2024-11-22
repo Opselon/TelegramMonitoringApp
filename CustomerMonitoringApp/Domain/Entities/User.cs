@@ -22,66 +22,52 @@ namespace CustomerMonitoringApp.Domain.Entities
         public int UserId { get; set; }
 
         /// <summary>
-        /// Username as displayed in the user's profile. Required, max length 100 characters.
+        /// Username as displayed in the user's profile. Required, max length 150 characters.
         /// </summary>
-
-        [StringLength(100)]
         public string? UserNameProfile { get; set; } = string.Empty;
 
         /// <summary>
         /// Unique number associated with the user's file. Optional, max length 50 characters.
         /// </summary>
-        [StringLength(50)]
         public string? UserNumberFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// First name of the user as recorded in their file. Required, max length 50 characters.
+        /// First name of the user as recorded in their file. Required, max length 120 characters.
         /// </summary>
-
-        [StringLength(120)]
         public string? UserNameFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Family name of the user as recorded in their file. Required, max length 50 characters.
+        /// Family name of the user as recorded in their file. Required, max length 150 characters.
         /// </summary>
-
-        [StringLength(150)] // Adjust based on the maximum expected length
         public string? UserFamilyFile { get; set; } = string.Empty;
 
         /// <summary>
-        /// Father's name of the user as recorded in their file. Optional, max length 50 characters.
+        /// Father's name of the user as recorded in their file. Optional, max length 100 characters.
         /// </summary>
-        [StringLength(100)]
         public string? UserFatherNameFile { get; set; } = string.Empty;
 
         /// <summary>
         /// Birth date of the user, stored as a string in "yyyy-MM-dd" format. Optional.
         /// </summary>
-        [StringLength(20)]
         public string? UserBirthDayFile { get; set; }
 
         /// <summary>
-        /// Address of the user as recorded in their file. Optional, max length 200 characters.
+        /// Address of the user as recorded in their file. Optional, max length 250 characters.
         /// </summary>
-        [StringLength(250)] // Adjust based on the maximum expected length
         public string? UserAddressFile { get; set; } = string.Empty;
 
         /// <summary>
         /// Additional description about the user. Optional, max length 500 characters.
         /// </summary>
-        [StringLength(50)]
         public string? UserDescriptionFile { get; set; } = string.Empty;
 
         /// <summary>
         /// Source of the user's data (e.g., data origin). Optional, max length 100 characters.
         /// </summary>
-        [StringLength(50)]
         public string? UserSourceFile { get; set; } = string.Empty;
 
-  
         public long? UserTelegramID { get; set; }
 
         #endregion
-
     }
 }

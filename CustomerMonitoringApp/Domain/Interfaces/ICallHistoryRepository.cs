@@ -1,9 +1,12 @@
-﻿using CustomerMonitoringApp.Domain.Entities;
+﻿using CustomerMonitoringApp.Application.DTOs;
+using CustomerMonitoringApp.Domain.Entities;
 using CustomerMonitoringApp.Domain.Views;
 using Microsoft.EntityFrameworkCore.Storage;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Data;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
 namespace CustomerMonitoringApp.Domain.Interfaces
@@ -64,7 +67,8 @@ namespace CustomerMonitoringApp.Domain.Interfaces
         /// <param name="phoneNumber">The phone number to search for in call histories.</param>
         /// <returns>A dictionary with dates and corresponding call frequency counts.</returns>
         Task<Dictionary<DateTime, int>> GetFrequentCallDatesByPhoneNumberAsync(string phoneNumber);
-
+        Task<List<CallHistory>> GetCallHistoryByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken);
+        Task<List<CallHistory>> GetAllCallHistoryAsync(CancellationToken cancellationToken);
         /// <summary>
         /// Retrieves the top N most recent call histories for a specific phone number.
         /// </summary>
@@ -73,6 +77,7 @@ namespace CustomerMonitoringApp.Domain.Interfaces
         /// <returns>A list of the top N recent call histories.</returns>
         Task<List<CallHistory>> GetTopNRecentCallsAsync(string phoneNumber, int numberOfCalls);
 
+        Task<int> GetCallHistoryCountAsync(CancellationToken cancellationToken);
         /// <summary>
         /// Checks if a phone number has been contacted within a specified time span.
         /// </summary>
@@ -116,7 +121,9 @@ namespace CustomerMonitoringApp.Domain.Interfaces
         /// </summary>
         /// <param name="phoneNumber">The phone number to search for in call histories.</param>
         /// <returns>A list of CallHistoryWithUserNames containing call history records and user names.</returns>
-        Task<List<CallHistoryWithUserNames>> GetCallsWithUserNamesAsync(string phoneNumber, CancellationToken cancellationToken);
+        IAsyncEnumerable<CallHistoryWithUserNames> GetCallsWithUserNamesStreamAsync(
+            string phoneNumber,
+            [EnumeratorCancellation] CancellationToken cancellationToken);
 
         /// <summary>
         /// Retrieves user details based on their phone number.
@@ -133,5 +140,28 @@ namespace CustomerMonitoringApp.Domain.Interfaces
         /// <param name="family">The family name of the user to search for.</param>
         /// <returns>A list of CallHistoryWithUserNames containing call history records and user names.</returns>
         Task<List<CallHistoryWithUserNames>> GetCallsByUserNamesAsync(string name, string family);
+        /// <summary>
+        /// Fetch user details by phone number.
+        /// </summary>
+        /// <param name="phoneNumber">The phone number to search for.</param>
+        /// <returns>User details or null if not found.</returns>
+        ///
+        /// 
+        Task<IEnumerable<UserCallSmsStatistics>> GetEnhancedUserStatisticsWithPartnersAsync(string phoneNumber ,int topCount = 1);
+
+        /// <summary>
+        /// Get total call count for a specific phone number.
+        /// </summary>
+        /// <param name="phoneNumber">The phone number to search for.</param>
+        /// <returns>Total number of calls made or received.</returns>
+        Task<int> GetCallCountByPhoneNumberAsync(string phoneNumber);
+        void GetEnhancedUserStatisticsWithPartnersInBackground(string phoneNumber, int topCount = 1);
+        /// <summary>
+        /// Get total message count for a specific phone number.
+        /// </summary>
+        /// <param name="phoneNumber">The phone number to search for.</param>
+        /// <returns>Total number of messages sent or received.</returns>
+        Task<int> GetMessageCountByPhoneNumberAsync(string phoneNumber);
+
     }
 }

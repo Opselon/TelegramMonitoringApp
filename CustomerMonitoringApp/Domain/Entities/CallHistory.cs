@@ -12,17 +12,31 @@ namespace CustomerMonitoringApp.Domain.Entities
     [Index(nameof(DestinationPhoneNumber))] // Index to optimize receiver phone lookups
     public class CallHistory
     {
+
+
+
+
         /// <summary>
         /// Unique identifier for the call record.
         /// </summary>
         [Key]
         public int CallId { get; set; }
 
+
+
+
+
+
         /// <summary>
         /// The phone number from which the call was made (source).
         /// </summary>
         [StringLength(13)]
         public string SourcePhoneNumber { get; set; } = string.Empty;
+
+
+
+
+
 
         /// <summary>
         /// The phone number that received the call (destination).
@@ -40,13 +54,21 @@ namespace CustomerMonitoringApp.Domain.Entities
         /// </summary>
         public int Duration { get; set; }
 
+
+
+
+
+
         /// <summary>
         /// The type of the call (e.g., inbound or outbound).
         /// </summary>
-        [StringLength(10)]
+        [StringLength(20)]
         public string CallType { get; set; } = string.Empty;
 
-        [StringLength(20)]
+
+
+
+        [StringLength(180)]
         // New Field to store the File Name
         public string FileName { get; set; }  // This is the new field
 

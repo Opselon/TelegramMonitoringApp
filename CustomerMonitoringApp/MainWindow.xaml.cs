@@ -40,17 +40,26 @@ using Run = System.Windows.Documents.Run;
 using User = CustomerMonitoringApp.Domain.Entities.User;
 using OfficeOpenXml;
 using System.ComponentModel.DataAnnotations;
+using System.Security.Cryptography;
+using CustomerMonitoringApp.Infrastructure.Repositories;
+using CustomerMonitoringAppWpf.Services;
+
 namespace CustomerMonitoringApp.WPFApp;
 
 public partial class MainWindow : Window
 {
+ 
+    private readonly CommandJobService _commandJobService;
     public MainWindow() : this(
         App.Services.GetRequiredService<ILogger<MainWindow>>(),
         App.Services.GetRequiredService<ICallHistoryRepository>(),
         App.Services.GetRequiredService<IServiceProvider>(),
+App.Services.GetRequiredService<IUserRepository>(),
         App.Services.GetRequiredService<NotificationService>(),
-        App.Services.GetRequiredService<ICallHistoryImportService>())
+        App.Services.GetRequiredService<ICallHistoryImportService>(),
+        App.Services.GetRequiredService<CommandJobService >())
     {
+   
         GetCommandInlineKeyboard();
         timestamp = GetPersianDate() + ".csv";
         LoadUsersFromDatabaseAsync();
@@ -212,6 +221,7 @@ public partial class MainWindow : Window
                                                 "Oops, something went wrong while trying to process your command. Please try again later. If the issue persists, contact support. 🛠️",
                 cancellationToken: cancellationToken);
         }
+
         finally
         {
             // Ensure user is marked as not busy once the task completes
@@ -663,15 +673,26 @@ public partial class MainWindow : Window
 
         try
         {
-            using (var writer = new StreamWriter(filePath, false, Encoding.UTF8))
-            using (var csv = new CsvWriter(writer, new CsvConfiguration(CultureInfo.InvariantCulture)
-                   {
-                       HasHeaderRecord = true, // Include headers
-                       Delimiter = ",", // Use comma as the delimiter
-                       ShouldQuote = field => true // Quote all fields to handle special characters
-                   }))
+            // Use UTF-8 encoding with BOM to ensure compatibility
+            var utf8WithBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: true);
+
+            // Configure CsvWriter with robust options
+            var csvConfig = new CsvConfiguration(CultureInfo.InvariantCulture)
             {
+                HasHeaderRecord = true, // Include headers
+                Delimiter = ",", // Use comma as the delimiter
+                ShouldQuote = field => true, // Quote all fields to handle special characters
+                TrimOptions = TrimOptions.Trim, // Trim whitespace from fields
+                SanitizeForInjection = true // Prevent CSV injection
+            };
+
+            using (var writer = new StreamWriter(filePath, append: false, encoding: utf8WithBom))
+            using (var csv = new CsvWriter(writer, csvConfig))
+            {
+                // Write the records to the CSV file
                 csv.WriteRecords(callHistories);
+
+                // Ensure data is written to the file
                 writer.Flush();
             }
 
@@ -693,24 +714,29 @@ public partial class MainWindow : Window
             _logger.LogError($"Unexpected error during CSV generation: {ex.Message}");
             return null;
         }
+        finally
+        {
+            // Optional: Perform cleanup if needed
+            _logger.LogDebug("GenerateCsv method execution completed.");
+        }
     }
+    private static List<(long FileSize, string ContentHash)> CachedFileDetails = new List<(long, string)>();
 
-    private static (string FileName, long FileSize, int RowCount) PreviousCallHistoryFileDetails;
 
     private async Task<bool> IsCallHistoryFileAsync(string filePath)
     {
         // Define expected headers for the CallHistory file
         var expectedHeaders = new List<string>
-        {
-            "شماره مبدا", // Source Phone
-            "شماره مقصد", // Destination Phone
-            "تاریخ", // Date
-            "ساعت", // Time
-            "مدت", // Duration
-            "نوع تماس" // Call Type
-        }
-            .Select(header => CleanHeader(header)) // Clean the expected headers
-            .ToList();
+    {
+        "شماره مبدا", // Source Phone
+        "شماره مقصد", // Destination Phone
+        "تاریخ", // Date
+        "ساعت", // Time
+        "مدت", // Duration
+        "نوع تماس" // Call Type
+    }
+        .Select(header => CleanHeader(header)) // Clean the expected headers
+        .ToList();
 
         // Set match threshold (70%)
         var matchThreshold = 0.7;
@@ -719,42 +745,37 @@ public partial class MainWindow : Window
         try
         {
             var fileInfo = new FileInfo(filePath);
-            var fileName = fileInfo.Name;
             var fileSize = fileInfo.Length;
 
-            // Read the Excel file to get the row count (Tedad Satr)
-            int rowCount = 0;
-            using (var package = new ExcelPackage(fileInfo))
+            // Generate content hash of the current file (excluding name)
+            var contentHash = await GenerateFileHashAsync(filePath);
+
+            // Log current file details and hash for debugging
+            Log($"Current File Size: {fileSize}, Hash: {contentHash}");
+
+            // Anti-duplicate check: Compare current file with the previous files in the cache
+            foreach (var cachedFile in CachedFileDetails)
             {
-                var worksheet = package.Workbook.Worksheets.FirstOrDefault();
-                if (worksheet != null)
+                if (cachedFile.FileSize == fileSize && cachedFile.ContentHash == contentHash)
                 {
-                    rowCount = worksheet.Dimension?.Rows ?? 0;
+                    Log("Duplicate file detected based on file size and content hash.");
+                    NotifyUserAboutDuplicate();
+                    return false; // Reject the file as it's a duplicate
                 }
             }
 
-            // Anti-duplicate check: Compare current file with the previous one
-            if (PreviousCallHistoryFileDetails.FileName == fileName &&
-                PreviousCallHistoryFileDetails.FileSize == fileSize &&
-                PreviousCallHistoryFileDetails.RowCount == rowCount)
-            {
-                Log("Error: Duplicate Call History file detected. Rejecting this file.");
-                return false; // Reject the file as it's a duplicate
-            }
-
-            // Update the previous file details
-            PreviousCallHistoryFileDetails = (fileName, fileSize, rowCount);
+            // If not a duplicate, add to cache
+            CachedFileDetails.Add((fileSize, contentHash));
 
             using (var package = new ExcelPackage(new FileInfo(filePath)))
             {
-                // Check if there are any worksheets in the file
+                // Ensure the file contains at least one worksheet
                 if (package.Workbook.Worksheets.Count == 0)
                 {
                     Log("Error: No worksheets found in the Excel file.");
                     return false;
                 }
 
-                // Ensure we're not accessing an out-of-range index
                 var worksheet = package.Workbook.Worksheets.FirstOrDefault();
                 if (worksheet == null)
                 {
@@ -762,19 +783,9 @@ public partial class MainWindow : Window
                     return false;
                 }
 
-                // Retrieve row and column counts
-                var rowCountInFile = worksheet.Dimension?.Rows ?? 0;
-                var columnCount = worksheet.Dimension?.Columns ?? 0;
-
-                // Check if the file has enough columns (6 expected)
-                if (columnCount < 6)
-                {
-                    Log("Error: The file has fewer than 6 columns.");
-                    return false;
-                }
-
-                // Retrieve headers from the first row, clean them and compare
+                // Validate headers
                 var headers = new List<string>();
+                var columnCount = worksheet.Dimension?.Columns ?? 0;
                 for (var col = 1; col <= columnCount; col++)
                 {
                     var header = worksheet.Cells[1, col].Text.Trim();
@@ -784,36 +795,23 @@ public partial class MainWindow : Window
                 // Log found headers for debugging
                 Log($"Found headers: {string.Join(", ", headers)}");
 
-                // Check if the headers match the expected headers with the given threshold
                 var matchedHeaderCount = headers.Intersect(expectedHeaders).Count();
-
-                // If the matched headers are below the threshold, return false
                 if (matchedHeaderCount < requiredMatches)
                 {
-                    Log(
-                        $"Error: Insufficient matching headers. Expected at least {requiredMatches} matches, found {matchedHeaderCount}.");
+                    Log($"Error: Insufficient matching headers. Expected at least {requiredMatches} matches, found {matchedHeaderCount}.");
                     return false;
                 }
 
-                // Check if there are enough rows of data (at least 2 rows: 1 header + 1 data row)
-                if (rowCountInFile < 2)
-                {
-                    Log("Error: File contains too few rows (must be at least 2).");
-                    return false;
-                }
-
-                // Counter for valid rows
+                // Validate rows
                 var validRowCount = 0;
-
-                // Validate each data row
-                for (var row = 2; row <= 5; row++) // Start from row 2 (skipping header row)
+                for (var row = 2; row <= worksheet.Dimension.Rows; row++) // Start from row 2 (skipping header row)
                 {
-                    var sourcePhone = worksheet.Cells[row, 1].Text.Trim(); // Column A: "شماره مبدا"
-                    var destinationPhone = worksheet.Cells[row, 2].Text.Trim(); // Column B: "شماره مقصد"
-                    var date = worksheet.Cells[row, 3].Text.Trim(); // Column C: "تاریخ"
-                    var time = worksheet.Cells[row, 4].Text.Trim(); // Column D: "ساعت"
-                    var durationText = worksheet.Cells[row, 5].Text.Trim(); // Column E: "مدت"
-                    var callType = worksheet.Cells[row, 6].Text.Trim(); // Column F: "نوع تماس"
+                    var sourcePhone = worksheet.Cells[row, 1].Text.Trim();
+                    var destinationPhone = worksheet.Cells[row, 2].Text.Trim();
+                    var date = worksheet.Cells[row, 3].Text.Trim();
+                    var time = worksheet.Cells[row, 4].Text.Trim();
+                    var durationText = worksheet.Cells[row, 5].Text.Trim();
+                    var callType = worksheet.Cells[row, 6].Text.Trim();
 
                     // Skip row if phone numbers are not numeric
                     if (!IsNumeric(sourcePhone) || !IsNumeric(destinationPhone))
@@ -828,7 +826,7 @@ public partial class MainWindow : Window
                         continue; // Skip this row and move to the next one
                     }
 
-                    // Validate the format of Date (yyyy/MM/dd) and Duration (integer)
+                    // Validate the format of Date and Duration
                     if (!DateTime.TryParseExact(date, "yyyy/MM/dd", null, DateTimeStyles.None, out _) ||
                         !int.TryParse(durationText, out _))
                     {
@@ -836,11 +834,13 @@ public partial class MainWindow : Window
                         continue; // Skip this row and move to the next one
                     }
 
-                    // Increment valid row counter
                     validRowCount++;
 
-                    // If we have more than 2 valid rows, return true
-                    if (validRowCount > 2) return true;
+                    // Stop when more than 2 valid rows are found
+                    if (validRowCount > 2)
+                    {
+                        return true; // Valid file
+                    }
                 }
 
                 // If we don't have more than 2 valid rows, return false
@@ -853,6 +853,7 @@ public partial class MainWindow : Window
             return false; // If an error occurs, assume the file is not a valid CallHistory file
         }
     }
+
     // Helper method to check if a string contains only numeric characters
     private bool IsNumeric(string input)
     {
@@ -874,8 +875,7 @@ public partial class MainWindow : Window
         }
     }
 
-
-    private static (string FileName, long FileSize, int RowCount) PreviousFileDetails;
+    private (string FileName, long FileSize, int RowCount, string FileContentHash) PreviousFileDetails;
 
     private async Task<bool> IsUserFile(string filePath)
     {
@@ -883,7 +883,7 @@ public partial class MainWindow : Window
         var expectedHeaders = new List<string> { "شماره تلفن", "نام", "نام خانوادگی", "نام پدر", "تاریخ تولد", "نشانی" }
             .Select(header => CleanHeader(header)).ToList();
 
-        // Set match threshold (70%)
+        // Set match threshold (60%)
         var matchThreshold = 0.6;
         var requiredMatches = (int)Math.Ceiling(expectedHeaders.Count * matchThreshold);
 
@@ -904,17 +904,23 @@ public partial class MainWindow : Window
                 }
             }
 
-            // Anti-duplicate check: Compare current file with the previous one
-            if (PreviousFileDetails.FileName == fileName &&
-                PreviousFileDetails.FileSize == fileSize &&
-                PreviousFileDetails.RowCount == rowCount)
+            // Anti-duplicate check: Compare current file with the previous one using both metadata and content
+            if (PreviousFileDetails.FileSize == fileSize && PreviousFileDetails.RowCount == rowCount)
             {
-                Log("Error: Duplicate file detected. Rejecting this file.");
-                return false; // Reject the file as it's a duplicate
+                // Generate and compare the content hash of the current file with the previous one
+                var currentFileHash = await GenerateFileHashAsync(filePath);
+                if (PreviousFileDetails.FileContentHash == currentFileHash)
+                {
+                    // Duplicate detected, notify user
+                    Log("Error: Duplicate file detected based on content hash. Rejecting this file.");
+                    NotifyUserAboutDuplicate();  // Notify the user about the duplicate
+                    return false; // Reject the file as it's a duplicate based on content hash
+                }
             }
 
-            // Update the previous file details
-            PreviousFileDetails = (fileName, fileSize, rowCount);
+            // Update the previous file details with metadata and content hash
+            var contentHash = await GenerateFileHashAsync(filePath);
+            PreviousFileDetails = (fileName, fileSize, rowCount, contentHash);
 
             using (var package = new ExcelPackage(new FileInfo(filePath)))
             {
@@ -949,14 +955,12 @@ public partial class MainWindow : Window
                 // Validate the match count against the threshold
                 if (matchedHeadersCount >= requiredMatches)
                 {
-                    Log(
-                        $"Success: Recognized as user file. Matched headers: {string.Join(", ", headers.Intersect(expectedHeaders))}");
+                    Log($"Success: Recognized as user file. Matched headers: {string.Join(", ", headers.Intersect(expectedHeaders))}");
                     return true; // Likely a user file
                 }
 
                 var missingHeaders = expectedHeaders.Except(headers).ToList();
-                Log(
-                    $"Error: Insufficient matching headers. Expected at least {requiredMatches} matches, found {matchedHeadersCount}. Missing headers: {string.Join(", ", missingHeaders)}.");
+                Log($"Error: Insufficient matching headers. Expected at least {requiredMatches} matches, found {matchedHeadersCount}. Missing headers: {string.Join(", ", missingHeaders)}.");
                 return false; // Not enough matches
             }
         }
@@ -966,6 +970,57 @@ public partial class MainWindow : Window
             return false;
         }
     }
+
+    // Method to notify the user about a duplicate file
+    private void NotifyUserAboutDuplicate()
+    {
+        // You can use any notification mechanism here. Example: logging or sending a message through a UI component.
+        // For now, we just log the message:
+        Log("Duplicate file detected. This file is being ignored to avoid duplication.");
+
+        // Optionally, you can trigger a UI notification or use any other method to alert the user.
+        // Example: 
+        // MessageBox.Show("The file is a duplicate and has been rejected.", "Duplicate File", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+
+
+    // Helper method to generate a hash of the file content (SHA256 or MD5)
+    private async Task<string> GenerateFileHashAsync(string filePath, HashAlgorithm hashAlgorithm = null)
+    {
+        // Use SHA256 by default if no algorithm is provided
+        hashAlgorithm ??= SHA256.Create();
+
+        try
+        {
+            using (var stream = File.OpenRead(filePath))
+            {
+                // Optimize for large files by using a buffer
+                const int bufferSize = 8192; // 8KB buffer size
+                var buffer = new byte[bufferSize];
+                int bytesRead;
+
+                // Loop through the file in chunks and update the hash
+                while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                {
+                    hashAlgorithm.TransformBlock(buffer, 0, bytesRead, null, 0);
+                }
+
+                // Finalize the hash and get the result
+                hashAlgorithm.TransformFinalBlock(buffer, 0, 0);
+
+                // Return the hash as a Base64 string
+                return Convert.ToBase64String(hashAlgorithm.Hash);
+            }
+        }
+        catch (Exception ex)
+        {
+            // Log error (optional, based on your logging framework)
+            Log($"Error generating file hash: {ex.Message}");
+            return string.Empty;
+        }
+    }
+
+
 
     // Helper function to clean the header text (removes spaces, colons, etc.)
     private string CleanHeader(string header)
@@ -1240,6 +1295,7 @@ public partial class MainWindow : Window
     private readonly ICallHistoryImportService _callHistoryImportService;
     private readonly IServiceProvider _serviceProvider;
     private readonly ICallHistoryRepository _callHistoryRepository;
+     private readonly IUserRepository _userRepository;
     private readonly List<CallHistoryWithUserNames> callHistoryData; //
 
     #endregion
@@ -1250,8 +1306,10 @@ public partial class MainWindow : Window
         ILogger<MainWindow> logger,
         ICallHistoryRepository callHistoryRepository,
         IServiceProvider serviceProvider,
+        IUserRepository userRepository,
         NotificationService notificationService,
-        ICallHistoryImportService callHistoryImportService)
+        ICallHistoryImportService callHistoryImportService,
+        CommandJobService commandJobService)
     {
         callHistoryData = new List<CallHistoryWithUserNames>();
         _lastMessageTimes = new ConcurrentDictionary<long, DateTime>();
@@ -1263,8 +1321,10 @@ public partial class MainWindow : Window
         _notificationService = notificationService ?? throw new ArgumentNullException(nameof(notificationService));
         _callHistoryImportService = callHistoryImportService ??
                                     throw new ArgumentNullException(nameof(callHistoryImportService));
+        _userRepository = userRepository;
         _userStates = new ConcurrentDictionary<long, UserState>();
         GetCommandInlineKeyboard();
+        _commandJobService = commandJobService;
     }
 
     private string GetPersianDate()
@@ -1513,10 +1573,95 @@ public partial class MainWindow : Window
     }
 
     #region Command Handler
+    // Utility to extract phone numbers from a message
+    private List<string> ExtractPhoneNumbers(string messageText)
+    {
+        return messageText.Split(new[] { '\n', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+            .Where(phone => Regex.IsMatch(phone, @"^\d{10}$")) // Adjust regex for your phone format
+            .ToList();
+    }
+private (List<string> ValidNumbers, List<string> InvalidEntries) ExtractEntries(string messageText)
+{
+    // Split by newlines first, then handle each line
+    var lines = messageText.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+
+    var validNumbers = new List<string>();
+    var invalidEntries = new List<string>();
+
+    foreach (var line in lines)
+    {
+        var trimmedLine = line.Trim(); // Trim to remove leading/trailing spaces
+
+        // Skip empty lines after trimming
+        if (string.IsNullOrEmpty(trimmedLine))
+            continue;
+
+        // Normalize numbers to ensure they start with "09"
+        string normalizedNumber = NormalizePersianNumber(trimmedLine);
+
+        if (normalizedNumber != null)
+        {
+            validNumbers.Add(normalizedNumber);
+        }
+        else
+        {
+            invalidEntries.Add(trimmedLine);
+        }
+    }
+
+    return (validNumbers, invalidEntries);
+}
+
+/// <summary>
+/// Normalizes a Persian phone number to the format starting with "09".
+/// </summary>
+/// <param name="input">The input phone number to normalize.</param>
+/// <returns>
+/// A normalized phone number in the "09xxxxxxxxx" format if valid, or <c>null</c> if the input is invalid.
+/// </returns>
+private string? NormalizePersianNumber(string input)
+{
+    if (string.IsNullOrWhiteSpace(input))
+        return null;
+
+    // Remove any non-numeric characters (e.g., spaces, dashes)
+    input = Regex.Replace(input, @"\D", "");
+
+    if (Regex.IsMatch(input, @"^9\d{9}$"))
+    {
+        // Add "0" prefix for numbers starting with "9"
+        return "0" + input;
+    }
+    else if (Regex.IsMatch(input, @"^98\d{9}$"))
+    {
+        // Replace "98" with "0" for numbers starting with "98"
+        return "0" + input.Substring(2);
+    }
+    else if (Regex.IsMatch(input, @"^09\d{9}$"))
+    {
+        // Numbers already starting with "09" are valid
+        return input;
+    }
+
+    // Return null for invalid formats
+    return null;
+}
+
+    private async Task ProcessPhoneNumbersInBatches(List<string> phoneNumbers, long chatId, CancellationToken cancellationToken)
+    {
+        const int batchSize = 1; // Adjust batch size based on performance testing
+        for (int i = 0; i < phoneNumbers.Count; i += batchSize)
+        {
+            var batch = phoneNumbers.Skip(i).Take(batchSize).ToList();
+            await Task.WhenAll(batch.Select(phoneNumber => SendUserDetailsToTelegramAsync(new[] { phoneNumber }, chatId, cancellationToken)));
+            await Task.Delay(3000); // Delay to avoid hitting Telegram API limits
+        }
+    }
 
     private async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update,
         CancellationToken cancellationToken)
     {
+
         var chatId = update.Message?.Chat?.Id;
         var messageId = update.Message?.MessageId;
 
@@ -1548,6 +1693,19 @@ public partial class MainWindow : Window
         if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Text)
         {
             var messageText = update.Message.Text;
+            // Extract numbers and other entries from the message
+            var entries = ExtractEntries(messageText);
+            var validPhoneNumbers = entries.ValidNumbers;
+            var invalidEntries = entries.InvalidEntries;
+
+            // If there are valid phone numbers, process them
+            if (validPhoneNumbers.Any())
+            {
+                await ProcessPhoneNumbersInBatches(validPhoneNumbers, chatId.Value, cancellationToken);
+            }
+
+
+         
             var commandParts = messageText.Split(' ');
             var command = commandParts[0].ToLower();
             var taskList = new List<Task>();
@@ -1583,16 +1741,28 @@ public partial class MainWindow : Window
                         await HandleHasRecentCallCommand(commandParts, chatId.Value, botClient, cancellationToken,
                             userState);
                         break;
+
+                    case "/database":
+                      await  HandleDatabaseCommand(commandParts, chatId.Value, botClient, cancellationToken);
+                        break;
+
+
                     case "/getallcalls":
                         await HandleAllCallWithName(commandParts, chatId.Value, botClient, cancellationToken,
                             userState);
+
+
                         break;
                     case "/whois":
                         await HandleWhoIsWithName(commandParts, chatId.Value, botClient, cancellationToken, userState);
+
+
                         break;
                     case "/reset":
                         await HandleDeleteAllCallsCommand(chatId.Value, botClient, cancellationToken);
                         break;
+
+
                     // New case to delete call histories by file name
                     // New case to delete call histories by file name
                     case "/deletecallsbyfilename":
@@ -1625,7 +1795,7 @@ public partial class MainWindow : Window
                             "🔝 /gettoprecentcalls - _Access the top N recent calls, giving you the latest records quickly._\n\n" +
                             "🕒 /hasrecentcall - _Check if a phone number had calls within a specific timeframe._\n\n" +
                             "📞 /getallcalls - _Retrieve a full call history with complete details._\n\n" +
-                            "👤 /whois - _Find call history by providing a user's name and family name._\n\n" + // New /whois command
+                            "👤 /whois - _Find call history by providing a user's name and family name._\n\n" + 
                             "🔄 /reset - _Clear the entire database of calls._\n\n" +
                             "🗑️ /deletebyfilename - _Delete call records by a specific file name._\n\n" +
                             "💬 Need more help? Type `/help` anytime for detailed instructions!\n\n" +
@@ -1661,6 +1831,8 @@ public partial class MainWindow : Window
             // Validate the update type and file extension
             if (update.Type == UpdateType.Message && update.Message?.Type == MessageType.Document)
             {
+
+
                 var document = update.Message.Document;
 
                 if (document != null && Path.GetExtension(document.FileName)!
@@ -1828,6 +2000,85 @@ public partial class MainWindow : Window
         if (update.Type == UpdateType.CallbackQuery)
             await HandleCallbackQueryAsync(botClient, update.CallbackQuery, cancellationToken);
     }
+    // Helper method to check if the message contains phone numbers
+    private bool IsPhoneNumberList(string messageText)
+    {
+        // Check if the message contains phone numbers (validate based on the expected pattern)
+        // We'll assume that the message contains one phone number per line.
+        var phoneNumbers = messageText.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+
+        return phoneNumbers.All(p => p.Length == 10 && p.All(char.IsDigit)); // Check if each line is a 10-digit number
+    }
+
+
+    public async Task HandleDatabaseCommand(string[] commandParts, long chatId, ITelegramBotClient botClient, CancellationToken cancellationToken, string number = "")
+    {
+        try
+        {
+            // Check if the command is "/database"
+            if (commandParts.Length < 1 || commandParts[0].ToLower() != "/database")
+            {
+                await botClient.SendTextMessageAsync(chatId, "⚠️ Invalid command. Use /database or /database <phone_number> to retrieve data. Example: `/database 0921321344`", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                return;
+            }
+
+            StringBuilder output = new StringBuilder();
+
+            // If there's a phone number provided after "/database"
+            if (commandParts.Length == 2)
+            {
+                var phoneNumber = commandParts[1];
+
+                // Validate phone number format
+                if (!IsValidPhoneNumber(phoneNumber))
+                {
+                    await botClient.SendTextMessageAsync(chatId, "❌ Invalid phone number format. Please provide a valid phone number. Example: `0921321344`", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                // Fetch user count and call history count using repositories
+                var userCount = (await _userRepository.GetCallHistoryByPhoneNumberAsync(phoneNumber, cancellationToken)).Count;
+                var callHistoryCount = (await _callHistoryRepository.GetCallHistoryByPhoneNumberAsync(phoneNumber, cancellationToken)).Count;
+
+                if (userCount == 0 && callHistoryCount == 0)
+                {
+                    await botClient.SendTextMessageAsync(chatId, $"⚠️ No data found for phone number `{phoneNumber}` in the database.", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                // Format and send results for the specific phone number
+                output.AppendLine($"🔍 **Results for Phone Number:** `{phoneNumber}`");
+                output.AppendLine($"### **Users Count:** *{userCount}*");
+                output.AppendLine($"### **Call History Count:** *{callHistoryCount}*");
+            }
+            else if (commandParts.Length == 1)
+            {
+                // Fetch total user count and call history count using repositories
+                var userCount = await _userRepository.GetTotalUserCountAsync();
+                var callHistoryCount = await _callHistoryRepository.GetCallHistoryCountAsync(cancellationToken);
+
+                if (userCount == 0 && callHistoryCount == 0)
+                {
+                    await botClient.SendTextMessageAsync(chatId, "⚠️ No data found in the database.", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+                    return;
+                }
+
+                // Format and send results for all users and call history counts
+                output.AppendLine("🔍 **All Database Results**");
+                output.AppendLine($"### **Total Users Count:** *{userCount}*");
+                output.AppendLine($"### **Total Call History Count:** *{callHistoryCount}*");
+            }
+
+            // Send the count message
+            await botClient.SendTextMessageAsync(chatId, output.ToString(), parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Handle any errors that occur
+            await botClient.SendTextMessageAsync(chatId, $"❌ An error occurred: {ex.Message}", parseMode: ParseMode.Markdown, cancellationToken: cancellationToken);
+        }
+    }
+
 
     #region HandleWhoIsWithName
 
@@ -1955,6 +2206,14 @@ public partial class MainWindow : Window
     #endregion
 
 
+
+
+
+
+
+
+
+
     private async Task HandleHasRecentCallCommand(
         string[] commandParts,
         long chatId,
@@ -2016,156 +2275,613 @@ public partial class MainWindow : Window
         }
     }
 
+
+
+
+
+
     /// <summary>
-    ///     Retrieves the user details based on phone number and sends it to the user via Telegram.
+    /// Escapes special characters in a string to make it safe for Markdown parsing in Telegram.
     /// </summary>
-    /// <summary>
-    ///     Sends user details to a Telegram chat based on the phone number.
-    /// </summary>
-    /// <param name="phoneNumber">The phone number of the user.</param>
-    /// <param name="chatId">The Telegram chat ID to send the details to.</param>
-    /// <param name="cancellationToken">Token to cancel the operation if needed.</param>
-    public async Task SendUserDetailsToTelegramAsync(string phoneNumber, long chatId,
-        CancellationToken cancellationToken)
+    /// <param name="input">The input string to escape.</param>
+    /// <returns>A string with special Markdown characters properly escaped.</returns>
+    string EscapeMarkdown(string? input)
+    {
+        if (string.IsNullOrEmpty(input))
+            return string.Empty;
+
+        // List of special Markdown characters that need to be escaped
+        var specialCharacters = new[] { "_", "*", "`", "[", "]", "(", ")", "~", ">", "#", "+", "-", "=", "|", "{", "}", ".", "!" };
+
+        // Escape each special character
+        foreach (var character in specialCharacters)
+        {
+            input = input.Replace(character, "\\" + character);
+        }
+
+        // Optionally, escape a few additional characters for a stricter escaping (like & or others)
+        input = input.Replace("&", "&amp;"); // Escape & to avoid potential parsing errors in HTML
+        input = input.Replace("<", "&lt;");  // Escape < and > for HTML-like scenarios
+        input = input.Replace(">", "&gt;");
+
+        return input;
+    }
+
+
+
+
+
+
+
+
+
+    public async Task SendUserDetailsToTelegramAsync(IEnumerable<string> phoneNumbers, long chatId, CancellationToken cancellationToken)
+    {
+        var notFoundNumbers = new List<string>();
+        var foundUsersDetails = new List<string>();
+
+        foreach (var phoneNumber in phoneNumbers)
+        {
+            try
+            {
+                // Fetch user statistics with call details and top partners
+                var userStatistics = await _callHistoryRepository.GetEnhancedUserStatisticsWithPartnersAsync(phoneNumber, 1);
+
+                if (userStatistics == null || !userStatistics.Any())
+                {
+                    _logger.LogWarning("No user statistics found for phone number: {PhoneNumber}.", phoneNumber);
+                    notFoundNumbers.Add(phoneNumber);
+                    continue;
+                }
+
+                // Ensure user is not null, return default if not found
+                var user = userStatistics.FirstOrDefault(u => u.PhoneNumber?.Replace(" ", "") == phoneNumber?.Replace(" ", "")) ??
+                            new UserCallSmsStatistics
+                            {
+                                PhoneNumber = phoneNumber, // Default value
+                                FirstName = "Not Available",
+                                LastName = "Not Available",
+                                FatherName = "Not Available",
+                                BirthDate = "Not Available",
+                                Address = "Not Available",
+                                UserSourceFiles = "Not Found",
+                                FileNames = "Not Available",
+                                TotalCalls = 0,
+                                TotalSMS = 0,
+                                TotalCallDuration = 0,
+                                FrequentPartners1 = "Not Available",
+                                FrequentPartners2 = "Not Available",
+                                FrequentPartners3 = "Not Available",
+                                FrequentPartners4 = "Not Available"
+                            };
+
+                // Ensure defaults are set for null or empty values
+                user.SetDefaultsIfNeeded();
+
+                // Build the user details message
+                var userDetailsMessage = BuildUserDetailsMessage(user);
+
+                // Add the user details to the list
+                foundUsersDetails.Add(userDetailsMessage);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error occurred while processing phone number: {PhoneNumber}", phoneNumber);
+                notFoundNumbers.Add(phoneNumber);
+            }
+        }
+
+        // Send all found user details in one message
+        if (foundUsersDetails.Any())
+        {
+            string foundUsersMessage = string.Join("\n\n---\n\n", foundUsersDetails); // Separate each user with "---"
+            await _botClient.SendMessage(chatId, foundUsersMessage, ParseMode.Markdown, cancellationToken: cancellationToken);
+        }
+
+        // Send a single message for all not found numbers
+        if (notFoundNumbers.Any())
+        {
+            string notFoundMessage = $"❌ *The following phone numbers were not found:*\n\n" +
+                                      string.Join("\n", notFoundNumbers.Select(n => $"- {EscapeMarkdown(n)}"));
+            await _botClient.SendMessage(chatId, notFoundMessage, ParseMode.Markdown, cancellationToken: cancellationToken);
+        }
+    }
+
+
+
+    private string BuildUserDetailsMessage(UserCallSmsStatistics user)
     {
         try
         {
-            // Fetch user details by phone number
-            var user = await _callHistoryRepository.GetUserDetailsByPhoneNumberAsync(phoneNumber);
+            // Helper function to safely format user details
+            string SafeFormat(string? value) => string.IsNullOrWhiteSpace(value) ? "Not Available" : value;
 
-            // Check if user was found
-            if (user == null)
+            // Helper function to clean up file details
+            string CleanFileDetail(string fileDetail)
             {
-                await _botClient.SendMessage(
-                    chatId,
-                    "❌ *No user found with the provided phone number.* Please try again with a valid phone number.",
-                    ParseMode.Markdown,
-                    cancellationToken: cancellationToken
-                );
-                return;
+                try
+                {
+                    return fileDetail
+                        .Replace("(CallHistories", string.Empty)
+                        .Replace("\\", string.Empty)
+                        .Replace(")", string.Empty)
+                        .Replace("(", string.Empty)
+                        .Replace("ریز", string.Empty)
+                        .Replace("Excel", string.Empty)
+                        .Replace(".xlsx", string.Empty)
+                        .Trim();
+                }
+                catch
+                {
+                    return "Unknown File Detail";
+                }
             }
 
-            // Format the message with user details
-            var message = $"👤 *User Details for Phone Number {user.UserNumberFile}*:\n\n" +
-                          $"📞 *Phone Number*: {user.UserNumberFile ?? "Not Available"}\n" +
-                          $"👤 *Full Name*: {user.UserNameFile ?? "Not Available"} {user.UserFamilyFile ?? "Not Available"}\n" +
-                          $"🧔 *Father's Name*: {user.UserFatherNameFile ?? "Not Available"}\n" +
-                          $"🎂 *Date of Birth*: {user.UserBirthDayFile ?? "Not Available"}\n" +
-                          $"🏠 *Address*: {user.UserAddressFile ?? "Not Available"}\n" +
-                          $"📱 *Telegram ID*: {user.UserTelegramID?.ToString() ?? "Not Available"}\n" +
-                          $"💬 *Description*: {user.UserDescriptionFile ?? "Not Available"}\n" +
-                          $"🌍 *Source*: {user.UserSourceFile ?? "Not Available"}\n" +
-                          $"🔢 *User ID*: {user.UserId}\n";
+            // Helper function to convert seconds to a human-readable format
+            string FormatDuration(int totalSeconds)
+            {
+                try
+                {
+                    TimeSpan time = TimeSpan.FromSeconds(totalSeconds);
+                    return $"{(time.TotalHours >= 1 ? $"{(int)time.TotalHours} hours, " : string.Empty)}" +
+                           $"{time.Minutes} minutes, {time.Seconds} seconds";
+                }
+                catch
+                {
+                    return "Invalid Duration";
+                }
+            }
 
-            // Send the user details message to Telegram
-            await _botClient.SendMessage(
-                chatId,
-                message,
-                ParseMode.Markdown,
-                cancellationToken: cancellationToken
-            );
+            var userDetailsBuilder = new StringBuilder();
+
+            try
+            {
+                userDetailsBuilder.AppendLine($"📋 *User Details for {EscapeMarkdown(SafeFormat(user.PhoneNumber))}*");
+                userDetailsBuilder.AppendLine();
+
+                userDetailsBuilder.AppendLine($"👤 *Name*: {EscapeMarkdown(SafeFormat(user.FirstName))} {EscapeMarkdown(SafeFormat(user.LastName))}");
+                userDetailsBuilder.AppendLine($"🧔 *Father's Name*: {EscapeMarkdown(SafeFormat(user.FatherName))}");
+                userDetailsBuilder.AppendLine($"🎂 *Date of Birth*: {EscapeMarkdown(SafeFormat(user.BirthDate))}");
+                userDetailsBuilder.AppendLine();
+
+                userDetailsBuilder.AppendLine($"📞 *Contact Information*");
+                userDetailsBuilder.AppendLine($"   - *Address*: {EscapeMarkdown(SafeFormat(user.Address))}");
+                userDetailsBuilder.AppendLine();
+            }
+            catch
+            {
+                userDetailsBuilder.AppendLine("Error formatting user details.");
+            }
+
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(user.UserSourceFiles) && user.FileNames != "Not Available")
+                {
+                    var sortedFiles = user.FileNames
+                        .Split(new[] { ", " }, StringSplitOptions.RemoveEmptyEntries)
+                        .GroupBy(fileInfo => fileInfo, StringComparer.OrdinalIgnoreCase)
+                        .OrderByDescending(g => g.Count())
+                        .Select((g, index) =>
+                            $"- {GetFileEmoji(index)} {EscapeMarkdown(CleanFileDetail(g.Key))} ({g.Count()} times) 📂")
+                        .ToList();
+
+                    userDetailsBuilder.AppendLine("📂 **Associated Files**:");
+                    userDetailsBuilder.AppendLine(string.Join("\n", sortedFiles));
+                }
+                else
+                {
+                    userDetailsBuilder.AppendLine("📂 **Associated Files**: No files associated.");
+                }
+            }
+            catch
+            {
+                userDetailsBuilder.AppendLine("Error processing file details.");
+            }
+
+            try
+            {
+                userDetailsBuilder.AppendLine();
+                userDetailsBuilder.AppendLine($"📊 *Activity Overview*");
+
+                if (user.TotalCalls > 0)
+                    userDetailsBuilder.AppendLine($"   - 📞 *Total Calls*: `{user.TotalCalls}`");
+                if (user.TotalSMS > 0)
+                    userDetailsBuilder.AppendLine($"   - 💬 *Total Messages*: `{user.TotalSMS}`");
+                if (user.TotalCallDuration > 0)
+                    userDetailsBuilder.AppendLine($"   - ⏳ *Call Duration*: {FormatDuration(user.TotalCallDuration)}");
+            }
+            catch
+            {
+                userDetailsBuilder.AppendLine("Error processing activity overview.");
+            }
+
+            try
+            {
+                userDetailsBuilder.AppendLine();
+                userDetailsBuilder.AppendLine($"🔥 *Most Frequent Call Partners*:");
+                var frequentPartners = GetFrequentPartners(user);
+                if (frequentPartners.Any())
+                {
+                    var sortedPartners = frequentPartners
+                        .GroupBy(p => p, StringComparer.OrdinalIgnoreCase)
+                        .OrderByDescending(g => g.Count())
+                        .Select(g => g.Key)
+                        .ToList();
+
+                    userDetailsBuilder.AppendLine(string.Join("\n", sortedPartners.Select(p =>
+                        $"- 📱 {EscapeMarkdown(CleanFileDetail(p))} 🌐"
+                    )));
+                }
+                else
+                {
+                    userDetailsBuilder.AppendLine("No frequent call partners found.");
+                }
+            }
+            catch
+            {
+                userDetailsBuilder.AppendLine("Error processing frequent call partners.");
+            }
+
+            return userDetailsBuilder.ToString();
         }
-        catch (Exception ex)
+        catch
         {
-            // Handle exceptions by logging the error and sending a generic error message to Telegram
-            // Log the exception (log code not shown here, replace with your logging mechanism)
-            Console.WriteLine($"Error sending user details to Telegram: {ex.Message}");
-
-            // Send an error message to the Telegram chat
-            await _botClient.SendMessage(
-                chatId,
-                "⚠️ An error occurred while retrieving user details. Please try again later.",
-                ParseMode.Markdown,
-                cancellationToken: cancellationToken
-            );
+            return "An error occurred while building the user details message.";
         }
     }
+
+
+    // Helper method to extract and format frequent partners
+    // Helper method to extract and format frequent partners
+    private List<string> GetFrequentPartners(UserCallSmsStatistics user)
+    {
+        // Collect all frequent partners from the user object
+        var partners = new[]
+            {
+                user.FrequentPartners1 ?? string.Empty,
+                user.FrequentPartners2 ?? string.Empty,
+                user.FrequentPartners3 ?? string.Empty,
+                user.FrequentPartners4 ?? string.Empty
+            }
+            .Where(partner => !string.IsNullOrWhiteSpace(partner) && partner != "Not Available") // Filter valid entries
+            .SelectMany(partner => partner.Split(',', StringSplitOptions.RemoveEmptyEntries)) // Split by commas
+            .Select(partner => partner.Trim()) // Trim whitespace
+            .Distinct(StringComparer.OrdinalIgnoreCase) // Ensure uniqueness, case-insensitively
+            .ToList();
+
+        return partners;
+    }
+
+
+
+
+    string GetFileEmoji(int index)
+    {
+        return index switch
+        {
+            0 => "1️⃣", // First file
+            1 => "2️⃣", // Second file
+            2 => "3️⃣", // Third file
+            3 => "4️⃣", // Fourth file
+            4 => "5️⃣", // Fifth file
+            5 => "6️⃣", // Sixth file
+            6 => "7️⃣", // Seventh file
+            7 => "8️⃣", // Eighth file
+            8 => "9️⃣", // Ninth file
+            9 => "🔟",  // Tenth file
+            _ => "📂",  // Default folder emoji for files beyond the 10th
+        };
+    }
+
 
 
     #region HandleAllCallWithName Method with Progress
 
     private async Task HandleAllCallWithName(
-        string[] commandParts,
-        long chatId,
-        ITelegramBotClient botClient,
-        CancellationToken cancellationToken,
-        UserState userState)
+    string[] commandParts,
+    long chatId,
+    ITelegramBotClient botClient,
+    CancellationToken cancellationToken,
+    UserState userState)
+{
+    // Check if the user is busy processing a request
+    if (userState.IsBusy)
     {
-        // Check if the user is busy processing a request
-        if (userState.IsBusy)
-        {
-            await botClient.SendMessage(chatId,
-                "⚠️ You are currently processing a request. Please wait until it is completed.",
-                cancellationToken: cancellationToken);
-            return;
-        }
+        await botClient.SendMessage(chatId,
+            "⚠️ You are currently processing a request. Please wait until it is completed.",
+            cancellationToken: cancellationToken);
+        return;
+    }
 
-        userState.IsBusy = true;
+    userState.IsBusy = true;
 
-        // Ensure a phone number is provided
-        if (commandParts.Length < 2)
-        {
-            await botClient.SendMessage(chatId, "Usage: /getallcalls [phoneNumber]",
-                cancellationToken: cancellationToken);
-            userState.IsBusy = false;
-            return;
-        }
+    // Ensure a phone number is provided
+    if (commandParts.Length < 2)
+    {
+        await botClient.SendMessage(chatId, "Usage: /getallcalls [phoneNumber]",
+            cancellationToken: cancellationToken);
+        userState.IsBusy = false;
+        return;
+    }
 
-        var phoneNumber = commandParts[1];
+    var phoneNumber = commandParts[1];
 
+    // Send the initial progress message
+    var progressMessage = await botClient.SendMessage(
+        chatId, "⚙️ Generating your file. Please wait...", cancellationToken: cancellationToken);
+
+    // Background task to handle the main logic
+    var mainTask = Task.Run(async () =>
+    {
         try
         {
-            // Display a "Please Wait" message to the user
-            var progressMessage = await botClient.SendMessage(
-                chatId, "⚙️ Generating your file. Please wait...", cancellationToken: cancellationToken);
-
-            // Fetch call history
-            var calls = await _callHistoryRepository.GetCallsWithUserNamesAsync(phoneNumber, cancellationToken);
-            if (calls == null || !calls.Any())
+            List<CallHistoryWithUserNames> calls = new();
+            // Step 1: Send user details
+            try
             {
-                await botClient.SendMessage(chatId, $"❌ No calls found for the phone number {phoneNumber}.",
-                    cancellationToken: cancellationToken);
+                await SendUserDetailsToTelegramAsync(new[] { phoneNumber }, chatId, cancellationToken);
+                await botClient.EditMessageText(chatId, progressMessage.MessageId, 
+                    "📝 User details fetched successfully. Proceeding to fetch call history...", cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Log($"Error sending user details: {ex.Message}");
+                await botClient.EditMessageText(chatId, progressMessage.MessageId, 
+                    "❌ Failed to fetch user details. Please try again later.", cancellationToken: cancellationToken);
+                return;
+            }
+            try
+            {
+                bool hasData = false;
+
+                var callHistoryStream = _callHistoryRepository.GetCallsWithUserNamesStreamAsync(phoneNumber, cancellationToken);
+
+                // Prepare a temporary list to hold records for additional operations if needed
+  
+
+                await foreach (var call in callHistoryStream)
+                {
+                    hasData = true;
+                    calls.Add(call); // Collect data for CSV generation or further processing
+                }
+
+                if (!hasData)
+                {
+                    await botClient.EditMessageText(chatId, progressMessage.MessageId,
+                        $"❌ No calls found for the phone number {phoneNumber}.", cancellationToken: cancellationToken);
+                    return;
+                }
+
+                await botClient.EditMessageText(chatId, progressMessage.MessageId,
+                    "📞 Call history fetched. Proceeding to generate CSV file...", cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Log($"Error fetching call history: {ex.Message}");
+                await botClient.EditMessageText(chatId, progressMessage.MessageId,
+                    "❌ Failed to fetch call history. Please try again later.", cancellationToken: cancellationToken);
                 return;
             }
 
-            // Show file format options (this method should prompt the user to choose CSV, JSON, or Excel format)
-            await DisplayFileFormatButtonsAsync(chatId, botClient, cancellationToken);
-
-
-            // Generate the CSV file
-            var csvFilePath = GenerateCsv(calls, phoneNumber);
-            if (string.IsNullOrEmpty(csvFilePath))
+            // Step 3: Generate the CSV file
+            string csvFilePath;
+            try
             {
-                await botClient.SendMessage(chatId, "❌ Failed to generate CSV file. Please try again later.",
-                    cancellationToken: cancellationToken);
+
+                csvFilePath = GenerateCsv(calls, phoneNumber);
+                if (string.IsNullOrEmpty(csvFilePath))
+                {
+                    await botClient.EditMessageText(chatId, progressMessage.MessageId, 
+                        "❌ Failed to generate CSV file. Please try again later.", cancellationToken: cancellationToken);
+                    return;
+                }
+                await botClient.EditMessageText(chatId, progressMessage.MessageId, 
+                    "📝 CSV file generated. Preparing to send...", cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Log($"Error generating CSV file: {ex.Message}");
+                await botClient.EditMessageText(chatId, progressMessage.MessageId, 
+                    "❌ Failed to generate CSV file. Please try again later.", cancellationToken: cancellationToken);
                 return;
             }
 
-            // Handle CSV file sending in chunks (large files need chunking)
-            await SendChunkedCsvFilesAsync(csvFilePath, chatId, botClient, cancellationToken, phoneNumber);
+            // Step 4: Handle CSV file sending
+            try
+            {
+                // Clean and optimize CSV file before sending (if applicable)
+                CleanCsvFileAsync(csvFilePath);
 
-            // Let the user know the file has been sent successfully
-            await botClient.SendMessage(chatId, "📁 Your call history has been sent in a CSV file.",
-                cancellationToken: cancellationToken);
+                // Send the CSV file to the user
+                using var stream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read);
+                await SendChunkedCsvFilesAsync(csvFilePath, chatId, botClient, cancellationToken, phoneNumber);
 
+                // Edit message to inform the user that the CSV is being sent
+                await botClient.EditMessageText(chatId, progressMessage.MessageId,
+                    "📤 Your call history CSV file is being sent...", cancellationToken: cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Log($"Error sending CSV file: {ex.Message} at {csvFilePath}");
+                await botClient.EditMessageText(chatId, progressMessage.MessageId,
+                    "❌ Failed to send your CSV file. Please try again later.", cancellationToken: cancellationToken);
+                return;
+            }
             // Optional: Clean up the generated file if no longer needed
-            File.Delete(csvFilePath);
+            try
+            {
+                File.Delete(csvFilePath);
+            }
+            catch (Exception ex)
+            {
+                Log($"Error deleting the CSV file: {ex.Message}");
+            }
+
+            // Final step: Notify the user
+            await botClient.EditMessageText(chatId, progressMessage.MessageId, 
+                "📁 Your call history has been successfully sent in a CSV file.", cancellationToken: cancellationToken);
         }
         catch (Exception ex)
         {
             Log($"Error processing the /getallcalls command: {ex.Message}");
-            await botClient.SendMessage(chatId,
-                "❌ *Error processing command*\n\nOops, something went wrong. Please try again later.",
+            await botClient.EditMessageText(chatId, progressMessage.MessageId, 
+                "❌ *Error processing command*\n\nOops, something went wrong. Please try again later.", 
                 ParseMode.Markdown, cancellationToken: cancellationToken);
         }
         finally
         {
             userState.IsBusy = false;
         }
-    }
+    });
+
+        // Task to periodically update the user with progress every 5 seconds
+        var progressTask = Task.Run(async () =>
+        {
+            int totalCalls = 100000; // For simulation, we'll assume the total calls as a placeholder
+            int processedCalls = 0; // Simulate processing calls
+            bool updateInProgress = false;
+
+            long startTime = DateTime.UtcNow.Ticks; // Capture the start time of the task
+
+            // Simulate progress updates without real calls (just based on time)
+            while (!mainTask.IsCompleted && !cancellationToken.IsCancellationRequested)
+            {
+                if (!updateInProgress)
+                {
+                    updateInProgress = true;
+
+                    // Calculate elapsed time in seconds
+                    long currentTime = DateTime.UtcNow.Ticks;
+                    long elapsedTime = currentTime - startTime;
+                    double elapsedSeconds = (double)elapsedTime / TimeSpan.TicksPerSecond;
+
+                    // Estimate the progress (assuming task takes ~300 seconds to complete)
+                    double progressPercentage = (elapsedSeconds / 300) * 100; // Assuming 5 minutes for completion
+                    progressPercentage = Math.Min(100, progressPercentage); // Cap at 100%
+
+                    // Estimated time remaining based on the progress percentage
+                    double remainingTime = (300 - elapsedSeconds) * (100 / Math.Max(progressPercentage, 1)); // Rough estimation
+                    string estimatedTimeText = remainingTime > 60
+                        ? $"{(int)(remainingTime / 60)} minutes remaining."
+                        : $"{(int)remainingTime} seconds remaining.";
+
+                    // Construct the progress message
+                    string progressText = $"📞 Processing... {progressPercentage:0}% completed.";
+                    string messageText = $"{progressText} ⏳ {estimatedTimeText}";
+
+                    // Update the message every 5 seconds
+                    await botClient.EditMessageText(
+                        chatId,
+                        progressMessage.MessageId,
+                        messageText,
+                        cancellationToken: cancellationToken
+                    );
+
+                    // Simulate delay of 5 seconds before the next update
+                    await Task.Delay(5000, cancellationToken); // Wait for 5 seconds
+
+                    updateInProgress = false;
+                }
+            }
+
+            // Final completion message after task is done
+            if (mainTask.IsCompleted)
+            {
+                await botClient.DeleteMessageAsync(chatId, progressMessage.MessageId, cancellationToken: cancellationToken);
+                await botClient.SendTextMessageAsync(chatId, "✅ Task completed successfully!", cancellationToken: cancellationToken);
+            }
+        });
+
+        // Wait for both tasks to complete
+        await Task.WhenAll(mainTask, progressTask);
+}
+
+
+
 
 
     #region CSV Generation with Enhanced Error Handling
+
+
+
+
+
+
+
+
+    // Helper function to clean the CSV file before sending
+    private async Task CleanCsvFileAsync(string csvFilePath)
+    {
+        try
+        {
+            // Read the CSV content asynchronously to improve performance on larger files
+            var cleanedLines = new List<string>();
+
+            // Use StreamReader for better memory management on large files
+            using (var reader = new StreamReader(csvFilePath))
+            {
+                string line;
+                while ((line = await reader.ReadLineAsync()) != null)
+                {
+                    var trimmedLine = line.Trim(); // Trim leading and trailing spaces
+                    if (!string.IsNullOrWhiteSpace(trimmedLine)) // Ignore empty lines
+                    {
+                        // Clean the line by trimming spaces within columns and preserving quoted values
+                        var cleanedLine = CleanCsvLine(trimmedLine);
+                        cleanedLines.Add(cleanedLine);
+                    }
+                }
+            }
+
+            // Write the cleaned data back to the CSV file asynchronously
+            await File.WriteAllLinesAsync(csvFilePath, cleanedLines);
+        }
+        catch (Exception ex)
+        {
+            // Handle any exceptions (e.g., file access issues)
+            Log($"Error cleaning CSV file: {ex.Message}");
+            throw;
+        }
+    }
+
+    // Helper method to clean individual CSV lines (handle columns and quoted values)
+    private string CleanCsvLine(string line)
+    {
+        // Split the line by commas, but handle quoted values properly
+        var columns = new List<string>();
+        bool insideQuotes = false;
+        string currentColumn = string.Empty;
+
+        for (int i = 0; i < line.Length; i++)
+        {
+            char c = line[i];
+
+            if (c == '"' && (i == 0 || line[i - 1] != '\\')) // Handle unescaped quotes
+            {
+                insideQuotes = !insideQuotes;
+            }
+            else if (c == ',' && !insideQuotes)
+            {
+                columns.Add(currentColumn.Trim()); // Add the trimmed column value
+                currentColumn = string.Empty;
+            }
+            else
+            {
+                currentColumn += c;
+            }
+        }
+
+        // Add the last column (if any)
+        if (!string.IsNullOrEmpty(currentColumn))
+        {
+            columns.Add(currentColumn.Trim());
+        }
+
+        // Rejoin the cleaned columns back into a single CSV line
+        return string.Join(",", columns);
+    }
+
+
 
     public string GenerateCsv(IEnumerable<CallHistoryWithUserNames> calls, string phoneNumber)
     {
@@ -2233,32 +2949,36 @@ public partial class MainWindow : Window
         const int maxFileSize = 48 * 1024 * 1024; // 50 MB limit for Telegram
         var fileInfo = new FileInfo(csvFilePath);
 
-        // If the file size is under the limit, send the file directly
         if (fileInfo.Length <= maxFileSize)
         {
+            // Send the file directly if it's within the size limit
             await SendCsvFileAsync(csvFilePath, chatId, botClient, cancellationToken, phoneNumber);
             return;
         }
 
-        // Split the file into smaller chunks
-        var chunkIndex = 0;
+        // Send in chunks for larger files
         using (var fileStream = new FileStream(csvFilePath, FileMode.Open, FileAccess.Read))
         {
             var buffer = new byte[maxFileSize];
-            int bytesRead;
-            while ((bytesRead = await fileStream.ReadAsync(buffer, 0, maxFileSize, cancellationToken)) > 0)
+            var chunkIndex = 1;
+
+            while (true)
             {
-                var chunkFileName = GetPersianFileName(phoneNumber);
-                var chunkFilePath = Path.Combine(Path.GetDirectoryName(csvFilePath), chunkFileName);
+                var bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
+                if (bytesRead == 0) break; // End of file
+                using (var streamWriter =
+                       new StreamWriter(csvFilePath, false, new UTF8Encoding(true))) // 'true' ensures BOM is included
+                using (var memoryStream = new MemoryStream(buffer, 0, bytesRead))
+                {
+                    var chunkFileName = $"{phoneNumber}_chunk{chunkIndex}.csv";
 
-                // Write the chunk to a new file
-                await File.WriteAllBytesAsync(chunkFilePath, buffer.Take(bytesRead).ToArray(), cancellationToken);
-
-                // Send the chunk file
-                await SendCsvFileAsync(chunkFilePath, chatId, botClient, cancellationToken, phoneNumber);
-
-                // Clean up the chunk file after sending
-                File.Delete(chunkFilePath);
+                    // Send chunk as an in-memory file
+                    await botClient.SendDocumentAsync(
+                        chatId,
+                        new InputFileStream(memoryStream, chunkFileName),
+                        caption: $"📁 Part {chunkIndex}: {chunkFileName}",
+                        cancellationToken: cancellationToken);
+                }
 
                 chunkIndex++;
             }
@@ -2267,23 +2987,19 @@ public partial class MainWindow : Window
 
     private string GetPersianFileName(string phoneNumber)
     {
-        // Get the current UTC time and convert it to the Persian calendar
         var persianCalendar = new PersianCalendar();
-        var currentDate = DateTime.UtcNow;
-        var persianYear = persianCalendar.GetYear(currentDate);
-        var persianMonth = persianCalendar.GetMonth(currentDate);
-        var persianDay = persianCalendar.GetDayOfMonth(currentDate);
-        var persianHour = persianCalendar.GetHour(currentDate);
-        var persianMinute = persianCalendar.GetMinute(currentDate);
-        var persianSecond = persianCalendar.GetSecond(currentDate);
+        var now = DateTime.UtcNow;
 
-        // Format the Persian date for the file name (yyyyMMddHHmmss)
-        var persianDate =
-            $"{persianYear:D4}{persianMonth:D2}{persianDay:D2}{persianHour:D2}{persianMinute:D2}{persianSecond:D2}";
+        var persianDate = $"{persianCalendar.GetYear(now):D4}" +
+                          $"{persianCalendar.GetMonth(now):D2}" +
+                          $"{persianCalendar.GetDayOfMonth(now):D2}" +
+                          $"{persianCalendar.GetHour(now):D2}" +
+                          $"{persianCalendar.GetMinute(now):D2}" +
+                          $"{persianCalendar.GetSecond(now):D2}";
 
-        // Return the formatted file name
         return $"getcalls_{phoneNumber}_{persianDate}.csv";
     }
+
 
     #endregion
 
@@ -3130,6 +3846,21 @@ public partial class MainWindow : Window
 
     // In-memory list to simulate database or user storage
     private readonly List<User> _users = new();
+    private string NormalizePhoneNumber(string phoneNumber)
+    {
+        if (string.IsNullOrWhiteSpace(phoneNumber))
+            return "Not Found";
+
+        // Check if the phone number starts with "98"
+        if (phoneNumber.StartsWith("98"))
+        {
+            // Replace "98" with "0" and return the modified number
+            return $"0{phoneNumber.Substring(2)}";
+        }
+
+        // Return the phone number as-is if it doesn't start with "98"
+        return phoneNumber;
+    }
 
 
     public User CreateUserFromRow(
@@ -3153,7 +3884,7 @@ public partial class MainWindow : Window
         {
             // Safe access to worksheet cells with null checks and default fallbacks
             userPhone = GetCellValue(worksheet, row, 1) ?? "Not Found";
-            userPhone = NormalizeIranianPhoneNumber(userPhone);
+            userName = GetCellValue(worksheet, row, 2) ?? "Not Found";
             userFamily = GetCellValue(worksheet, row, 3) ?? "No Family";
             userFatherName = GetCellValue(worksheet, row, 4) ?? "No Father Name";
             userBirthDayString = GetCellValue(worksheet, row, 5) ?? "No BirthDay";
@@ -3168,16 +3899,10 @@ public partial class MainWindow : Window
             return null; // Skip the row by returning null
         }
 
-        // Normalize phone number: If it starts with "98", convert it to "09"
-        if (!string.IsNullOrEmpty(userPhone) && userPhone.StartsWith("98"))
-        {
-            userPhone = "09" + userPhone.Substring(2);
-        }
-
         // Trim fields to their respective maximum lengths
-        userPhone = TrimToMaxLength(userPhone, 50); // UserNumberFile max length 50
-        userName = TrimToMaxLength(userName, 100); // UserNameProfile max length 100
-        userFamily = TrimToMaxLength(userFamily, 150); // UserFamilyFile max length 150
+        userPhone = NormalizePhoneNumber(userPhone); // UserNumberFile max length 50
+        userName = TrimToMaxLength(userName, 250); // UserNameProfile max length 100
+        userFamily = TrimToMaxLength(userFamily, 250); // UserFamilyFile max length 150
         userFatherName = TrimToMaxLength(userFatherName, 100); // UserFatherNameFile max length 100
         userBirthDayString = TrimToMaxLength(userBirthDayString, 20); // UserBirthDayFile max length 20
         userAddress = TrimToMaxLength(userAddress, 250); // UserAddressFile max length 250
@@ -3197,31 +3922,119 @@ public partial class MainWindow : Window
             chatId,
             row);
     }
-    // Normalize Iranian phone numbers (converts numbers starting with "98" to "09")
-    private string NormalizeIranianPhoneNumber(string? userPhone)
+    public static string NormalizeIranianPhoneNumber(string? userPhone)
     {
         if (string.IsNullOrEmpty(userPhone))
-            return userPhone ?? string.Empty;
+            return string.Empty;  // Early exit for null or empty input
 
-        // Remove all non-numeric characters (spaces, dashes, parentheses, etc.)
-        var cleanedPhone = new string(userPhone.Where(char.IsDigit).ToArray());
+        // Step 1: Clean the phone number by removing non-numeric characters
+        string cleanedPhone = RemoveNonNumericChars(userPhone);
 
-        // Check if the phone number starts with "98" (Iran's international dialing code)
-        if (cleanedPhone.StartsWith("98"))
+        // Step 2: Determine phone number type and normalize
+        if (IsValidInternationalNumber(cleanedPhone))
         {
-            // Replace "98" with "09" to convert to local format
-            cleanedPhone = "09" + cleanedPhone.Substring(2);
+            cleanedPhone = NormalizeInternationalPhoneNumber(cleanedPhone);
+        }
+        else if (IsValidLocalNumber(cleanedPhone))
+        {
+            cleanedPhone = NormalizeLocalPhoneNumber(cleanedPhone);
+        }
+        else
+        {
+            return string.Empty;  // Invalid format, return empty
         }
 
-        // Ensure the phone number is 11 digits (Iranian phone numbers are usually 11 digits after formatting)
-        if (cleanedPhone.Length != 11)
-        {
-            // Log error or handle invalid length as needed
-            return string.Empty; // Invalid phone number, return empty string or custom error handling
-        }
+        // Step 3: Final Check: Ensure exactly 11 digits and return the normalized phone number
+        cleanedPhone = EnsureValidLength(cleanedPhone);
 
         return cleanedPhone;
     }
+
+    #region Helper Methods
+
+    // Helper method to remove non-numeric characters from the phone number
+    private static string RemoveNonNumericChars(string number)
+    {
+        return new string(number.Where(char.IsDigit).ToArray());
+    }
+
+    // Helper method to check if the phone number starts with '98' (International)
+    private static bool IsValidInternationalNumber(string number)
+    {
+        return number.StartsWith("98") && number.Length == 12;  // Should be 12 digits for Iranian international numbers
+    }
+
+    // Helper method to check if the phone number starts with '09' (Local mobile number)
+    private static bool IsValidLocalNumber(string number)
+    {
+        return number.StartsWith("09") && number.Length == 11;  // Should be 11 digits for local mobile numbers
+    }
+
+
+    // Normalize international numbers starting with "98" to local format starting with "09"
+    private static string NormalizeInternationalPhoneNumber(string number)
+    {
+        // Replace the international "98" with "09" for the local format
+        return "0" + number.Substring(2);  // Remove "98" and prefix with "0"
+    }
+
+    // Normalize local mobile numbers (ensure they start with "09" and are exactly 11 digits)
+    private static string NormalizeLocalPhoneNumber(string number)
+    {
+        // Ensure the number starts with "09" and is exactly 11 digits
+        if (number.Length == 11)
+        {
+            return number;  // Already in correct format
+        }
+
+        // If the number is shorter than expected, pad it with leading zeros (if possible)
+        if (number.Length < 11)
+        {
+            return number.PadLeft(11, '0');
+        }
+
+        return string.Empty;  // If the length is invalid, return empty
+    }
+
+    // Normalize landline numbers (ensure they are exactly 11 digits, starting with area code)
+    private static string NormalizeLandlinePhoneNumber(string number)
+    {
+        // Ensure the landline number is exactly 11 digits (including area code)
+        if (number.Length == 11)
+        {
+            return number;  // Already in correct format
+        }
+
+        return string.Empty;  // Invalid landline number, return empty
+    }
+
+    // Final helper method to ensure the phone number has exactly 11 digits
+    private static string EnsureValidLength(string number)
+    {
+        // Ensure the final length is 11 digits
+        if (number.Length == 11)
+        {
+            return number;  // Valid length
+        }
+
+        return string.Empty;  // Invalid length, return empty
+    }
+    #endregion
+  
+
+    #endregion
+
+    #region Logging and Error Handling (Optional)
+
+    // This is a stub method to demonstrate logging (you could integrate a logging library like Serilog)
+    private static void LogInvalidNumber(string number)
+    {
+        Console.WriteLine($"Invalid phone number format: {number}");
+    }
+
+    // You could enhance error handling further by implementing exceptions, warnings, or logs as needed
+    #endregion
+
 
 
     // Helper method to trim fields to the maximum allowed length
@@ -3353,22 +4166,6 @@ public partial class MainWindow : Window
     #endregion
 
 
-    private string NormalizePhoneNumber(string phoneNumber)
-    {
-        if (string.IsNullOrWhiteSpace(phoneNumber))
-            return string.Empty;
-
-        // Example normalization: remove spaces, dashes, and parentheses
-        var normalizedNumber = phoneNumber
-            .Replace(" ", "") // Remove spaces
-            .Replace("-", "") // Remove dashes
-            .Replace("(", "") // Remove opening parentheses
-            .Replace(")", ""); // Remove closing parentheses
-
-        // You can add more normalization rules as needed
-
-        return normalizedNumber;
-    }
 
 
     public async Task SetBotCommandsAsync(ITelegramBotClient botClient)
@@ -3846,7 +4643,6 @@ public partial class MainWindow : Window
         Log(message); // Log message as well
     }
 
-    #endregion
 
 
     #region Button Color Definitions
@@ -3902,4 +4698,38 @@ public partial class MainWindow : Window
     #endregion
 
     #endregion
+
+    private void LogTextBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        try
+        {
+            // Get all text from the RichTextBox
+            var document = new TextRange(LogTextBox.Document.ContentStart, LogTextBox.Document.ContentEnd);
+            string fullText = document.Text.TrimEnd(); // Remove trailing newlines
+
+            // Split the text into lines
+            var lines = fullText.Split(new[] { Environment.NewLine }, StringSplitOptions.None);
+
+            // Check if the number of lines exceeds 10
+            if (lines.Length > 10)
+            {
+                // Keep only the last 10 lines
+                var updatedText = string.Join(Environment.NewLine, lines.Skip(lines.Length - 10));
+
+                // Replace the content in the RichTextBox
+                LogTextBox.Document.Blocks.Clear();
+                LogTextBox.Document.Blocks.Add(new Paragraph(new Run(updatedText)));
+
+                // Move the caret to the end of the text
+                LogTextBox.CaretPosition = LogTextBox.Document.ContentEnd;
+
+                // Scroll to the bottom of the RichTextBox
+                LogTextBox.ScrollToEnd();
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"An error occurred while updating the log: {ex.Message}");
+        }
+    }
 }

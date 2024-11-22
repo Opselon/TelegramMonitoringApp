@@ -4,6 +4,11 @@ using CustomerMonitoringApp.Infrastructure.Data;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Polly;
+using Polly.CircuitBreaker;
+using Polly.Retry;
+using Polly.Timeout;
+using Serilog;
+using System.Threading;
 
 namespace CustomerMonitoringApp.Infrastructure.Repositories
 {
@@ -11,16 +16,44 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
     {
         private readonly AppDbContext _context;
 
+        private readonly AsyncRetryPolicy _retryPolicy;
+        private readonly AsyncTimeoutPolicy _timeoutPolicy;
+        private readonly AsyncCircuitBreakerPolicy _circuitBreakerPolicy;
         public UserRepository(AppDbContext context)
         {
-            _context = context;
+            _context = context ?? throw new ArgumentNullException(nameof(context));
+            // تعریف سیاست‌های Polly
+            _retryPolicy = Policy.Handle<Exception>()
+                .WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)),
+                    (exception, timeSpan, retryCount, context) =>
+                    {
+                        // ثبت خطا یا مدیریت تلاش‌های مجدد
+                        Log.Warning($"Retry attempt {retryCount} failed: {exception.Message}");
+                    });
 
+            _timeoutPolicy = Policy.TimeoutAsync(10); // Timeout after 10 seconds
+
+            _circuitBreakerPolicy = Policy.Handle<Exception>()
+                .CircuitBreakerAsync(2, TimeSpan.FromMinutes(1),
+                    onBreak: (exception, timespan) =>
+                    {
+                        // زمانی که Circuit Breaker باز می‌شود
+                        Log.Warning("Circuit breaker is open due to multiple errors.");
+                    },
+                    onReset: () =>
+                    {
+                        // زمانی که Circuit Breaker ریست می‌شود
+                        Log.Information("Circuit breaker is reset.");
+                    });
         }
 
         public async Task<User?> GetUserByTelegramIdAsync(long telegramId)
         {
             return null;
         }
+        // This method retrieves the total number of users from the database
+
+
 
         public async Task<IEnumerable<User>> GetAllUsersAsync()
         {
@@ -49,6 +82,26 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
                 // Handle any error that occurs during the operation
                 throw new ApplicationException("Error retrieving all users.", ex);
             }
+        }
+        public async Task<int> GetUserCountByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken)
+        {
+            return await _context.Users
+                .Where(u => u.UserNumberFile == phoneNumber)
+                .CountAsync(cancellationToken);
+        }
+
+
+
+        public async Task<List<User>> GetUsersByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken)
+        {
+            return await _context.Users
+                .Where(u => u.UserNumberFile == phoneNumber)
+                .ToListAsync(cancellationToken);
+        }
+
+        public async Task<List<User>> GetAllUsersAsync(CancellationToken cancellationToken)
+        {
+            return await _context.Users.ToListAsync(cancellationToken);
         }
 
 
@@ -274,11 +327,6 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
             throw new NotImplementedException();
         }
 
-        public Task<int> GetTotalUserCountAsync()
-        {
-            throw new NotImplementedException();
-        }
-
         public Task<IEnumerable<User>> GetUsersOrderedByLastNameAsync()
         {
             throw new NotImplementedException();
@@ -307,6 +355,70 @@ namespace CustomerMonitoringApp.Infrastructure.Repositories
         public Task<IEnumerable<User>> GetUsersByNameMatchAsync(string name)
         {
             throw new NotImplementedException();
+        }
+
+        public Task<List<CallHistory>> GetCallHistoryByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken)
+        {
+            throw new NotImplementedException();
+        }
+
+        public Task<List<CallHistory>> GetAllCallHistoryAsync(CancellationToken cancellationToken)
+        {
+            throw new NotImplementedException();
+        }
+
+        public async Task<int> GetCallHistoryCountAsync(CancellationToken cancellationToken)
+        {
+            try
+            {
+                // استفاده از ترکیب سیاست‌های Polly (Retry, Timeout, Circuit Breaker)
+                return await _retryPolicy.ExecuteAsync(async () =>
+                    await _timeoutPolicy.ExecuteAsync(async () =>
+                        await _circuitBreakerPolicy.ExecuteAsync(async () =>
+                        {
+                            // دریافت تعداد رکوردها از دیتابیس به صورت غیرهمزمان
+                            return await _context.CallHistories.CountAsync(cancellationToken);
+                        })
+                    )
+                );
+            }
+            catch (TimeoutRejectedException ex)
+            {
+                // مدیریت خطا در صورتی که عملیات timeout شود
+                Log.Error($"Timeout occurred while retrieving call history count: {ex.Message}");
+                throw new ApplicationException("The operation timed out while retrieving call history count.", ex);
+            }
+            catch (BrokenCircuitException ex)
+            {
+                // مدیریت خطا در صورتی که circuit breaker فعال شود
+                Log.Error($"Circuit breaker is open: {ex.Message}");
+                throw new ApplicationException("Circuit breaker is open. The operation is temporarily unavailable.", ex);
+            }
+            catch (Exception ex)
+            {
+                // مدیریت سایر خطاها
+                Log.Error($"Unexpected error occurred while retrieving call history count: {ex.Message}");
+                throw new ApplicationException("Unexpected error occurred while retrieving call history count.", ex);
+            }
+        }
+        // Implementing the GetTotalUserCountAsync method to count all users
+
+        public async Task<int> GetTotalUserCountAsync()
+        {
+            try
+            {
+                // Counting all users in the database asynchronously
+                int userCount = await _context.Users.CountAsync();
+
+                // Return the result wrapped in Task<int>
+                return userCount;
+            }
+            catch (Exception ex)
+            {
+                // Handle any errors that occur
+                // Optionally log the error if you're using a logging framework
+                throw new Exception("An error occurred while fetching the user count.", ex);
+            }
         }
     }
 }

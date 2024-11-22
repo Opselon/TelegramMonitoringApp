@@ -14,6 +14,11 @@ namespace CustomerMonitoringApp.Domain.Interfaces
 
         // Additional Methods for Useful Queries
 
+        Task<List<User>> GetUsersByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken);
+        Task<List<User>> GetAllUsersAsync(CancellationToken cancellationToken);
+        Task<List<CallHistory>> GetCallHistoryByPhoneNumberAsync(string phoneNumber, CancellationToken cancellationToken);
+        Task<int> GetCallHistoryCountAsync(CancellationToken cancellationToken);
+        Task<int> GetTotalUserCountAsync();
         // 1. Retrieve user by phone number.
         Task<User?> GetUserByPhoneNumberAsync(string phoneNumber);
 
@@ -52,9 +57,6 @@ namespace CustomerMonitoringApp.Domain.Interfaces
 
         // 13. Retrieve users by a range of birth years.
         Task<IEnumerable<User>> GetUsersByBirthYearRangeAsync(int startYear, int endYear);
-
-        // 14. Count total users.
-        Task<int> GetTotalUserCountAsync();
 
         // 15. Retrieve users in alphabetical order by last name.
         Task<IEnumerable<User>> GetUsersOrderedByLastNameAsync();

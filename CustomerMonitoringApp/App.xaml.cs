@@ -21,6 +21,8 @@ using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Data.SqlClient;
 using System.Data;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Hosting;
 
 namespace CustomerMonitoringApp
 {
@@ -28,17 +30,18 @@ namespace CustomerMonitoringApp
     {
         public static IServiceProvider Services { get; private set; }
 
+        private IHost _dashboardHost;
 
         protected override void OnStartup(StartupEventArgs e)
         {
+            // راه‌اندازی داشبورد Hangfire
+            _dashboardHost = CreateDashboardHostBuilder().Build();
+            _dashboardHost.Start();
             var serviceCollection = new ServiceCollection();
             ConfigureServices(serviceCollection);
 
             var services = new ServiceCollection();
             services.AddLogging();
-
-
-     ;
 
             Services = serviceCollection.BuildServiceProvider();
 
@@ -85,6 +88,26 @@ namespace CustomerMonitoringApp
             });
         }
 
+        private static IHostBuilder CreateDashboardHostBuilder()
+        {
+            return Host.CreateDefaultBuilder()
+                .ConfigureWebHostDefaults(webBuilder =>
+                {
+                    webBuilder.UseUrls("http://localhost:5000"); // آدرس داشبورد
+                    webBuilder.Configure(app =>
+                    {
+                        app.UseRouting();
+                        app.UseHangfireDashboard("/hangfire"); // مسیر داشبورد
+                    });
+                    webBuilder.ConfigureServices(services =>
+                    {
+                        services.AddHangfire(configuration =>
+                            configuration.UseSqlServerStorage(@"Data Source=.;Integrated Security=True;Encrypt=True;Trust Server Certificate=True"));
+                        services.AddHangfireServer();
+                    });
+                });
+        }
+
         [STAThread]
         private void ConfigureServices(IServiceCollection services)
         {
@@ -92,8 +115,7 @@ namespace CustomerMonitoringApp
             // Register services for dependency injection
             services.AddSingleton<TelegramMessageHandler>();
             services.AddSingleton<NotificationService>();
-
- 
+            services.AddScoped<IUserRepository, UserRepository>();
             // Set the maximum request body size to handle large requests.
             services.Configure<IISServerOptions>(options =>
             {

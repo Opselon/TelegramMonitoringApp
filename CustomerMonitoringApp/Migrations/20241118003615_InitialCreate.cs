@@ -21,7 +21,7 @@ namespace CustomerMonitoringApp.Migrations
                     CallDateTime = table.Column<string>(type: "nvarchar(max)", maxLength: 20, nullable: false),
                     Duration = table.Column<int>(type: "int", nullable: false, defaultValue: 0),
                     CallType = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
-                    FileName = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false)
+                    FileName = table.Column<string>(type: "nvarchar(180)", maxLength: 180, nullable: false)
                 },
                 constraints: table =>
                 {
@@ -54,15 +54,15 @@ namespace CustomerMonitoringApp.Migrations
                 {
                     UserId = table.Column<int>(type: "int", nullable: false)
                         .Annotation("SqlServer:Identity", "1, 1"),
-                    UserNameProfile = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    UserNumberFile = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    UserNameFile = table.Column<string>(type: "nvarchar(120)", maxLength: 120, nullable: true),
-                    UserFamilyFile = table.Column<string>(type: "nvarchar(150)", maxLength: 150, nullable: true),
-                    UserFatherNameFile = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
-                    UserBirthDayFile = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: true),
-                    UserAddressFile = table.Column<string>(type: "nvarchar(250)", maxLength: 250, nullable: true),
-                    UserDescriptionFile = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    UserSourceFile = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
+                    UserNameProfile = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    UserNumberFile = table.Column<string>(type: "nvarchar(450)", nullable: true),
+                    UserNameFile = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    UserFamilyFile = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    UserFatherNameFile = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    UserBirthDayFile = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    UserAddressFile = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    UserDescriptionFile = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    UserSourceFile = table.Column<string>(type: "nvarchar(max)", nullable: true),
                     UserTelegramID = table.Column<long>(type: "bigint", nullable: true)
                 },
                 constraints: table =>
