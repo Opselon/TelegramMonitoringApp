@@ -1,31 +1,35 @@
 
+
 # Customer Monitoring Application
 
 ## Description
 
-The **Customer Monitoring Application** is a robust WPF-based application designed to manage and monitor users and their permissions. This application enables businesses to maintain user data, handle permissions efficiently, and interact with a SQL Server database using Entity Framework Core. With a focus on user experience, it provides a user-friendly interface for managing customer information and permissions, making it suitable for small to medium-sized businesses.
+The **Customer Monitoring Application** is a robust WPF-based application designed to manage and monitor users and their permissions. It provides powerful features for businesses to efficiently manage user data, permissions, and interact with a secure SQL Server database using modern techniques like **Polly** for resilience and enhanced error handling. The app also integrates a **Telegram Bot**, allowing seamless communication for file imports, exports, and data management on the go.
 
-In addition to user management, this application integrates a **Telegram Bot** that enhances functionality by enabling users to interact with the application through Telegram, making it easier to manage tasks on the go.
+This application is optimized to handle large amounts of data securely, ensuring reliability even when working with large files.
 
-### Features
+### Key Features
 
-- **User Management**: Create, read, update, and delete user profiles with ease.
-- **Permission Management**: Assign, manage, and revoke permissions for users, ensuring appropriate access levels.
-- **SQL Server Integration**: Leverages Entity Framework Core for seamless data access and manipulation.
-- **WPF User Interface**: Offers a clean, modern interface designed for easy navigation and interaction.
+- **User Management**: Manage customer profiles with full CRUD (Create, Read, Update, Delete) functionality.
+- **Permission Management**: Assign, manage, and revoke user permissions to control access levels.
+- **Database Security**: Uses secure database connections and advanced techniques like **Polly** for retry policies and handling transient faults.
+- **WPF User Interface**: Offers a modern, intuitive user interface built with Windows Presentation Foundation (WPF).
 - **Telegram Bot Integration**:
-  - **Receive Excel Files**: Users can receive Excel files directly through the Telegram bot.
-  - **Export Data**: Data can be exported to Excel with customizable configurations, allowing for tailored output formats.
-  - **Special Configurations**: Users can specify particular settings for data export, such as file format, specific columns, and data filtering.
+  - **Receive Files**: Users can send Excel files directly to the bot for processing.
+  - **Data Export**: Export data in different formats (CSV, XLSX, JSON, XML) with fine-tuned configurations.
+  - **Advanced Data Management**: Users can filter, configure, and export data based on their needs.
 
-## Technologies Used
+### Best Practices and Technologies Used
 
-- **C# (.NET 6)**: The primary programming language and framework for developing the application.
-- **WPF (Windows Presentation Foundation)**: Used to build the application's user interface.
-- **Entity Framework Core**: An ORM for accessing and managing data in the SQL Server database.
-- **SQL Server**: The database management system used for data storage.
-- **Dependency Injection**: Utilizes `Microsoft.Extensions.DependencyInjection` for managing application services.
-- **Telegram Bot API**: For implementing the Telegram bot features.
+- **C# (.NET 8)**: The primary programming language and framework for the application, utilizing the latest version of .NET 8.
+- **WPF (Windows Presentation Foundation)**: Built using WPF to deliver a modern and responsive desktop UI.
+- **Entity Framework Core 8**: An Object-Relational Mapper (ORM) for data access, supporting both SQL Server and large datasets efficiently.
+- **SQL Server**: The relational database management system for secure data storage and retrieval.
+- **Polly**: A resilience and transient fault-handling library, providing retry policies for managing failures, especially when working with large data.
+- **Secure Database Connections**: Uses secure practices such as **SQL Server Authentication**, **Encryption**, and **Connection String Management** to safeguard sensitive data.
+- **Telegram Bot API**: Facilitates seamless interaction with users, receiving and sending files and notifications directly in Telegram.
+
+---
 
 ## Getting Started
 
@@ -33,7 +37,7 @@ In addition to user management, this application integrates a **Telegram Bot** t
 
 Before you begin, ensure you have the following installed:
 
-- [.NET 6 SDK](https://dotnet.microsoft.com/download/dotnet/6.0)
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 - [SQL Server](https://www.microsoft.com/en-us/sql-server/sql-server-downloads) (local or remote)
 - [Visual Studio 2022 or later](https://visualstudio.microsoft.com/vs/) (with the .NET desktop development workload)
 - A Telegram bot token (you can create a bot using the BotFather on Telegram).
@@ -92,11 +96,84 @@ Before you begin, ensure you have the following installed:
    Update-Database
    ```
 
-### Running the Application
+---
 
-1. Set the **Startup Project** to `CustomerMonitoringApp` in Visual Studio.
-2. Press `F5` or click on the **Start** button to build and run the application.
-3. The main window will open, allowing you to manage users and permissions.
+## Secure and Efficient Data Handling with Polly
+
+**Polly** is integrated to ensure that the application can handle transient errors, like database timeouts or network issues, when working with large data sets. By using retry policies, you can ensure that the application remains resilient in the face of occasional failures, reducing the risk of disruptions during long-running tasks like data imports.
+
+### Polly Configuration Example
+
+In the `DatabaseService.cs` (or relevant service), you can configure Polly like so:
+
+```csharp
+public class DatabaseService
+{
+    private readonly IAsyncPolicy _retryPolicy;
+
+    public DatabaseService()
+    {
+        // Define a retry policy that retries up to 3 times with exponential backoff
+        _retryPolicy = Policy
+            .Handle<SqlException>()
+            .WaitAndRetryAsync(3, attempt => TimeSpan.FromSeconds(Math.Pow(2, attempt)));
+    }
+
+    public async Task ExecuteWithRetryAsync(Func<Task> action)
+    {
+        await _retryPolicy.ExecuteAsync(action);
+    }
+}
+```
+
+This ensures that if the database connection fails due to transient faults (like temporary unavailability or timeouts), the application will automatically retry the operation, reducing the chances of failure.
+
+---
+
+## Database Security Enhancements
+
+The application implements secure database access to protect user data:
+
+- **Encryption**: All sensitive data is encrypted using industry-standard encryption algorithms both at rest and in transit.
+- **SQL Server Authentication**: Uses **Windows Authentication** and **SQL Server Authentication** methods to ensure only authorized users can access the database.
+- **Environment-Specific Configuration**: Ensures that the connection strings and sensitive data are stored in a secure manner using **Azure Key Vault** or **local secrets management**.
+
+### Example of Secure Database Connection
+
+```json
+"ConnectionStrings": {
+    "DefaultConnection": "Server=tcp:yourserver.database.windows.net,1433;Initial Catalog=YourDB;Persist Security Info=False;User ID=youruser;Password=yourpassword;MultipleActiveResultSets=False;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"
+}
+```
+
+---
+
+## Handling Large Data Efficiently
+
+To ensure that large files (e.g., Excel, CSV, etc.) can be processed without running into memory issues, the application uses **chunking**, **asynchronous processing**, and **batching** techniques. 
+
+- **Chunking**: Data is processed in smaller chunks, allowing the application to handle large datasets without consuming excessive memory.
+- **Asynchronous File Processing**: Long-running tasks, such as importing or exporting large files, are performed asynchronously to prevent UI freezes and improve responsiveness.
+
+### Example of Asynchronous File Processing
+
+```csharp
+public async Task ImportLargeFileAsync(string filePath, CancellationToken cancellationToken)
+{
+    using (var reader = new StreamReader(filePath))
+    {
+        while (!reader.EndOfStream)
+        {
+            if (cancellationToken.IsCancellationRequested) break;
+
+            var line = await reader.ReadLineAsync();
+            // Process the line here
+        }
+    }
+}
+```
+
+---
 
 ## Usage
 
@@ -107,18 +184,17 @@ Before you begin, ensure you have the following installed:
   - Export data with custom configurations using commands in Telegram.
   - Utilize special export settings to format data as required.
 
-## Contributing
+---
 
-Contributions are welcome! If you have suggestions or improvements, please fork the repository and submit a pull request.
+
 
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-## Acknowledgments
-
-- Special thanks to the contributors and the community for their support and feedback.
-
 ---
 
-Feel free to adjust any sections further based on your project’s specifics or any additional features you want to highlight!
+Acknowledgments
+Special thanks to the contributors and the community for their support and feedback. This project wouldn't have been possible without the input and collaboration from the open-source community.
+A big thank you to the developers of Polly for making fault tolerance easier and more manageable.
+Thanks to Microsoft for providing the .NET ecosystem and Telegram for their Bot API, which enables smooth integration into this project.
